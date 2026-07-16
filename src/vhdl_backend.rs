@@ -1,11 +1,11 @@
 use crate::{
     BinaryOp, ClockEdge, ConversionKind, GenericKind, HardwareType, ModuleId, PortDirection,
-    ResetKind, SignalId, SignalKind, TimeUnit, TypedClockedBlock, TypedExpr, TypedExprKind,
-    TypedModule, TypedNext, TypedProgram, TypedTestbench, TypedTestbenchStmt, UnaryOp,
-    VhdlArchitecture, VhdlConcurrentStatement, VhdlDeclaration, VhdlDesign, VhdlDesignUnit,
-    VhdlEntity, VhdlExpression, VhdlGeneric, VhdlGenericKind, VhdlIdentifier, VhdlPort,
-    VhdlPortMode, VhdlProcess, VhdlSensitivity, VhdlSequentialStatement, VhdlType, VhdlVariable,
-    WidthExpr,
+    ResetKind, SignalId, SignalKind, StaticBitMotionKind, TimeUnit, TypedClockedBlock, TypedExpr,
+    TypedExprKind, TypedModule, TypedNext, TypedProgram, TypedTestbench, TypedTestbenchStmt,
+    UnaryOp, VhdlArchitecture, VhdlConcurrentStatement, VhdlDeclaration, VhdlDesign,
+    VhdlDesignUnit, VhdlEntity, VhdlExpression, VhdlGeneric, VhdlGenericKind, VhdlIdentifier,
+    VhdlPort, VhdlPortMode, VhdlProcess, VhdlSensitivity, VhdlSequentialStatement, VhdlType,
+    VhdlVariable, WidthExpr,
 };
 use std::{collections::HashMap, fmt};
 
@@ -49,6 +49,7 @@ struct SignalNames {
 
 struct LowerContext {
     names: HashMap<SignalId, SignalNames>,
+    generics: Vec<crate::GenericId>,
     temporary: u32,
     variables: Vec<VhdlVariable>,
 }
@@ -197,6 +198,7 @@ fn lower_module(
         let target = signal_name(&names, assignment.target)?.read.clone();
         let mut context = LowerContext {
             names: names.clone(),
+            generics: module.generics.iter().map(|generic| generic.id).collect(),
             temporary: 0,
             variables: Vec::new(),
         };
@@ -212,7 +214,13 @@ fn lower_module(
     }
     for block in &module.clocked_blocks {
         statements.push(VhdlConcurrentStatement::Process(lower_clocked(
-            block, &names,
+            block,
+            &names,
+            &module
+                .generics
+                .iter()
+                .map(|generic| generic.id)
+                .collect::<Vec<_>>(),
         )?));
     }
     for instance in &module.instances {
@@ -345,6 +353,7 @@ fn lower_module(
 fn lower_clocked(
     block: &TypedClockedBlock,
     names: &HashMap<SignalId, SignalNames>,
+    generics: &[crate::GenericId],
 ) -> Result<VhdlProcess, VhdlBackendError> {
     if block.edge != ClockEdge::Rising {
         return Err(VhdlBackendError::new(
@@ -355,6 +364,7 @@ fn lower_clocked(
     let clock = signal_name(names, block.clock)?.read.clone();
     let mut context = LowerContext {
         names: names.clone(),
+        generics: generics.to_vec(),
         temporary: 0,
         variables: Vec::new(),
     };
@@ -523,6 +533,7 @@ fn lower_testbench(
     }
     let mut context = LowerContext {
         names,
+        generics: Vec::new(),
         temporary: 0,
         variables: Vec::new(),
     };
@@ -922,6 +933,113 @@ fn lower_expr(
                 arguments: vec![source],
             })
         }
+        TypedExprKind::StaticBitMotion {
+            kind,
+            value,
+            amount,
+        } => {
+            if !width_generics_are_known(amount, &context.generics) {
+                return Err(VhdlBackendError::new(
+                    VhdlBackendErrorKind::InconsistentId,
+                    "static shift or rotate amount contains an unknown GenericId",
+                ));
+            }
+            let source_width = hardware_width(&value.ty).ok_or_else(|| {
+                VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "static shift or rotate source is not a vector",
+                )
+            })?;
+            if expr.ty != value.ty || hardware_width(&expr.ty) != Some(source_width.clone()) {
+                return Err(VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "static shift or rotate result type is inconsistent",
+                ));
+            }
+            let signed = matches!(
+                value.ty,
+                HardwareType::Signed(_) | HardwareType::SymbolicSigned(_)
+            );
+            if (*kind == StaticBitMotionKind::ShiftRightLogical && signed)
+                || (*kind == StaticBitMotionKind::ShiftRightArithmetic && !signed)
+            {
+                return Err(VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "static shift source signedness is inconsistent",
+                ));
+            }
+            let end = add_width_backend(amount.clone(), WidthExpr::Constant(1))?;
+            if !prove_ge_backend(&source_width, &end) {
+                return Err(VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "static shift or rotate amount is not proven less than source width",
+                ));
+            }
+            let function = match kind {
+                StaticBitMotionKind::ShiftLeft => "shift_left",
+                StaticBitMotionKind::ShiftRightLogical
+                | StaticBitMotionKind::ShiftRightArithmetic => "shift_right",
+                StaticBitMotionKind::RotateLeft => "rotate_left",
+                StaticBitMotionKind::RotateRight => "rotate_right",
+            };
+            Ok(VhdlExpression::Call {
+                function: VhdlIdentifier(function.into()),
+                arguments: vec![lower_expr(value, context, prelude)?, lower_width(amount)?],
+            })
+        }
+    }
+}
+
+fn width_generics_are_known(width: &WidthExpr, known: &[crate::GenericId]) -> bool {
+    match width {
+        WidthExpr::Constant(_) => true,
+        WidthExpr::Generic(id) => known.contains(id),
+        WidthExpr::Add(left, right) | WidthExpr::Multiply(left, right) => {
+            width_generics_are_known(left, known) && width_generics_are_known(right, known)
+        }
+    }
+}
+
+fn prove_ge_backend(big: &WidthExpr, small: &WidthExpr) -> bool {
+    if big == small {
+        return true;
+    }
+    if let (WidthExpr::Constant(a), WidthExpr::Constant(b)) = (big, small) {
+        return a >= b;
+    }
+    let mut big_terms = Vec::new();
+    let mut small_terms = Vec::new();
+    flatten_width_terms(big, &mut big_terms);
+    flatten_width_terms(small, &mut small_terms);
+    let mut unmatched_small = Vec::new();
+    for term in small_terms {
+        if let Some(index) = big_terms.iter().position(|candidate| *candidate == term) {
+            big_terms.remove(index);
+        } else {
+            unmatched_small.push(term);
+        }
+    }
+    if unmatched_small.is_empty() {
+        return true;
+    }
+    let constant_sum = |terms: &[&WidthExpr]| {
+        terms.iter().try_fold(0_u64, |sum, term| match term {
+            WidthExpr::Constant(value) => sum.checked_add(*value),
+            _ => None,
+        })
+    };
+    matches!(
+        (constant_sum(&big_terms), constant_sum(&unmatched_small)),
+        (Some(big), Some(small)) if big >= small
+    )
+}
+
+fn flatten_width_terms<'a>(width: &'a WidthExpr, terms: &mut Vec<&'a WidthExpr>) {
+    if let WidthExpr::Add(left, right) = width {
+        flatten_width_terms(left, terms);
+        flatten_width_terms(right, terms);
+    } else {
+        terms.push(width);
     }
 }
 
@@ -1057,7 +1175,9 @@ fn expr_truncate_helpers(expr: &TypedExpr, flags: &mut (bool, bool)) {
                 expr_truncate_helpers(value, flags);
             }
         }
-        TypedExprKind::ReverseBits { value } => expr_truncate_helpers(value, flags),
+        TypedExprKind::ReverseBits { value } | TypedExprKind::StaticBitMotion { value, .. } => {
+            expr_truncate_helpers(value, flags)
+        }
     }
 }
 fn module_truncate_helpers(module: &TypedModule) -> (bool, bool) {
@@ -1111,7 +1231,9 @@ fn expr_has_bit_concat(expr: &TypedExpr) -> bool {
                 || expr_has_bit_concat(when_false)
         }
         TypedExprKind::Signal(_) | TypedExprKind::Integer(_) => false,
-        TypedExprKind::ReverseBits { value } => expr_has_bit_concat(value),
+        TypedExprKind::ReverseBits { value } | TypedExprKind::StaticBitMotion { value, .. } => {
+            expr_has_bit_concat(value)
+        }
     }
 }
 fn module_needs_bit_concat(module: &TypedModule) -> bool {
@@ -1152,6 +1274,7 @@ fn expr_has_reverse_bits(expr: &TypedExpr) -> bool {
                 || expr_has_reverse_bits(when_false)
         }
         TypedExprKind::Concat { values } => values.iter().any(expr_has_reverse_bits),
+        TypedExprKind::StaticBitMotion { value, .. } => expr_has_reverse_bits(value),
         TypedExprKind::Signal(_) | TypedExprKind::Integer(_) => false,
     }
 }

@@ -1,0 +1,6 @@
+(module generic-static-shift
+  (generics (amount :natural 1))
+  (ports
+    (input :in (unsigned (+ amount 1)))
+    (value :out (unsigned (+ amount 1))))
+  (assign value (shift-left input amount)))

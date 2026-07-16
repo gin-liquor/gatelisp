@@ -1,0 +1,11 @@
+(module generic-static-shift
+  (generics (amount :natural 1))
+  (ports
+    (input :in (unsigned (+ amount 1)))
+    (value :out (unsigned (+ amount 1))))
+  (assign value (shift-left input amount)))
+(testbench generic-static-shift-test
+  (target generic-static-shift (generics (amount 3)))
+  (stimulus
+    (drive input 1) (wait 1 ns)
+    (assert (= value 8) "generic shift")))

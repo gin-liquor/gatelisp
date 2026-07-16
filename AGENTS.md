@@ -16,6 +16,9 @@ GateLispは、Lisp形式でハードウェア回路を記述し、将来的にVH
 * VHDL名は専用のname mappingを介して生成する。
 * VHDL出力の決定性を維持し、Golden Testと利用可能ならGHDLで検証する。
 * 現在依頼された範囲を超える機能を勝手に追加しない。
+* shift／rotate量はConstExprに限定し、source幅未満をgeneric defaultに頼らず静的証明する。
+* logical rightはunsigned、arithmetic rightはsignedに限定し、幅以上を暗黙moduloしない。
+* shift／rotateはnumeric_std関数へLoweringし、不要なhelperを生成しない。
 * 変更後は必ずformat、clippy、testを実行する。
 * テストしやすさと分かりやすさを、過度な抽象化より優先する。
 

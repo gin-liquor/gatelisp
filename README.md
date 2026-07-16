@@ -225,8 +225,27 @@ fails. VHDL lowering emits explicit ranges and `&` concatenation; bit operands
 use an architecture-local one-bit vector helper. The offset/width form was
 chosen to make LSB-oriented hardware fields and generic field sizes explicit.
 
-Runtime indices, high/low slice syntax, individual bit indexing, shifts, and
-rotates are not implemented.
+Runtime indices, high/low slice syntax, and individual bit indexing are not implemented.
+
+## Static shifts and rotates
+
+`shift-left`, `shift-right-logical`, `shift-right-arithmetic`, `rotate-left`,
+and `rotate-right` preserve the source width and signedness. Left shift and both
+rotates accept signed or unsigned vectors; logical right accepts only unsigned,
+and arithmetic right accepts only signed. Rotates operate on the raw bit sequence.
+
+The amount is a non-negative compile-time expression made from literals, the
+current module's generics, `+`, and `*`. It must be statically provable to be
+less than the source width for every legal generic value. Zero is an identity;
+width-sized amounts are errors and are never implicitly reduced modulo width.
+For a signed logical shift, convert explicitly, for example
+`(as-signed (shift-right-logical (as-unsigned value) 1))`.
+
+Nested forms such as `(reverse-bits (rotate-left input 1))` are supported, as
+are conversions, slices, concatenations, clocked updates, and testbenches. VHDL
+lowering directly uses the `numeric_std` `shift_left`, `shift_right`,
+`rotate_left`, and `rotate_right` overloads. Runtime shift amounts, bit sources,
+funnel shifts, and carry-producing shifts are not implemented.
 
 ## Bit-order reversal
 

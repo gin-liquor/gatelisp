@@ -239,6 +239,20 @@ pub enum TypedExprKind {
     ReverseBits {
         value: Box<TypedExpr>,
     },
+    StaticBitMotion {
+        kind: StaticBitMotionKind,
+        value: Box<TypedExpr>,
+        amount: WidthExpr,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaticBitMotionKind {
+    ShiftLeft,
+    ShiftRightLogical,
+    ShiftRightArithmetic,
+    RotateLeft,
+    RotateRight,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

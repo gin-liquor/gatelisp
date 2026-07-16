@@ -213,4 +213,18 @@ pub enum Expr {
     Concat {
         values: Vec<Spanned<Expr>>,
     },
+    StaticBitMotion {
+        kind: StaticBitMotionSyntaxKind,
+        value: Box<Spanned<Expr>>,
+        amount: Spanned<ConstExprAst>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaticBitMotionSyntaxKind {
+    ShiftLeft,
+    ShiftRightLogical,
+    ShiftRightArithmetic,
+    RotateLeft,
+    RotateRight,
 }

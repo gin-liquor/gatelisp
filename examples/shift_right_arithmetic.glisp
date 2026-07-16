@@ -1,0 +1,3 @@
+(module shift-right-arithmetic-example
+  (ports (input :in (signed 8)) (value :out (signed 8)))
+  (assign value (shift-right-arithmetic input 1)))

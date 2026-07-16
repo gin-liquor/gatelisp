@@ -1,0 +1,3 @@
+(module shift-left-signed
+  (ports (input :in (signed 8)) (value :out (signed 8)))
+  (assign value (shift-left input 1)))

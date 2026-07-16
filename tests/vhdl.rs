@@ -116,6 +116,32 @@ fn generated_vhdl_matches_golden_files() {
             "generic_reverse_bits_test",
             include_str!("golden/generic_reverse_bits_test.expected.vhd"),
         ),
+        ("shift_left", include_str!("golden/shift_left.expected.vhd")),
+        (
+            "shift_left_signed",
+            include_str!("golden/shift_left_signed.expected.vhd"),
+        ),
+        (
+            "shift_right_logical",
+            include_str!("golden/shift_right_logical.expected.vhd"),
+        ),
+        (
+            "shift_right_arithmetic",
+            include_str!("golden/shift_right_arithmetic.expected.vhd"),
+        ),
+        ("rotate", include_str!("golden/rotate.expected.vhd")),
+        (
+            "generic_shift",
+            include_str!("golden/generic_shift.expected.vhd"),
+        ),
+        (
+            "shift_rotate_test",
+            include_str!("golden/shift_rotate_test.expected.vhd"),
+        ),
+        (
+            "generic_shift_test",
+            include_str!("golden/generic_shift_test.expected.vhd"),
+        ),
     ] {
         assert_eq!(
             compile_example(name).replace("\r\n", "\n"),

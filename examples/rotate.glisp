@@ -1,0 +1,7 @@
+(module rotate-example
+  (ports
+    (input :in (unsigned 8))
+    (rotated-left :out (unsigned 8))
+    (rotated-right :out (unsigned 8)))
+  (assign rotated-left (rotate-left input 1))
+  (assign rotated-right (rotate-right input 1)))

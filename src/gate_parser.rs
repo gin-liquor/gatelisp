@@ -4,7 +4,8 @@ use crate::{
     AssignStmt, ClockedDecl, ConstExprAst, Expr, GenericBinding, GenericDecl, GenericKindSyntax,
     Identifier, InstanceDecl, ModuleDecl, ModuleItem, NextStmt, PortConnection, PortDecl,
     PortDirection, Program, RegisterDecl, ResetDecl, ResetKind, SExpr, Span, Spanned,
-    TestbenchClockDecl, TestbenchDecl, TestbenchStmt, TimeLiteral, TimeUnit, TypeExpr, WireDecl,
+    StaticBitMotionSyntaxKind, TestbenchClockDecl, TestbenchDecl, TestbenchStmt, TimeLiteral,
+    TimeUnit, TypeExpr, WireDecl,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -895,6 +896,31 @@ fn parse_expr(expression: &Spanned<SExpr>) -> Result<Spanned<Expr>, GateParseErr
                 return Ok(Spanned {
                     value: Expr::Concat {
                         values: list[1..].iter().map(parse_expr).collect::<Result<_, _>>()?,
+                    },
+                    span: expression.span,
+                });
+            }
+            let motion = match callee.name.as_str() {
+                "shift-left" => Some(StaticBitMotionSyntaxKind::ShiftLeft),
+                "shift-right-logical" => Some(StaticBitMotionSyntaxKind::ShiftRightLogical),
+                "shift-right-arithmetic" => Some(StaticBitMotionSyntaxKind::ShiftRightArithmetic),
+                "rotate-left" => Some(StaticBitMotionSyntaxKind::RotateLeft),
+                "rotate-right" => Some(StaticBitMotionSyntaxKind::RotateRight),
+                _ => None,
+            };
+            if let Some(kind) = motion {
+                if list.len() != 3 {
+                    return Err(error(
+                        GateParseErrorKind::InvalidExpression,
+                        "static shift and rotate require source and amount",
+                        expression,
+                    ));
+                }
+                return Ok(Spanned {
+                    value: Expr::StaticBitMotion {
+                        kind,
+                        value: Box::new(parse_expr(&list[1])?),
+                        amount: parse_const_expr(&list[2])?,
                     },
                     span: expression.span,
                 });

@@ -7,10 +7,11 @@ use crate::{
     BinaryOp, ClockEdge, ClockedBlockId, ClockedDecl, ConstExprAst, ConversionKind, Expr,
     GenericBinding, GenericId, GenericKind, GenericKindSyntax, HardwareType, InstanceId,
     ModuleDecl, ModuleId, ModuleItem, NextStmt, PortDirection, Program, SignalId, SignalKind,
-    SimulationTime, Span, Spanned, TestbenchDecl, TestbenchId, TestbenchStmt, TypeExpr,
-    TypedAssign, TypedClockedBlock, TypedExpr, TypedExprKind, TypedGeneric, TypedGenericBinding,
-    TypedInstance, TypedModule, TypedNext, TypedPortConnection, TypedProgram, TypedReset,
-    TypedSignal, TypedTestbench, TypedTestbenchClock, TypedTestbenchStmt, UnaryOp, WidthExpr,
+    SimulationTime, Span, Spanned, StaticBitMotionKind, StaticBitMotionSyntaxKind, TestbenchDecl,
+    TestbenchId, TestbenchStmt, TypeExpr, TypedAssign, TypedClockedBlock, TypedExpr, TypedExprKind,
+    TypedGeneric, TypedGenericBinding, TypedInstance, TypedModule, TypedNext, TypedPortConnection,
+    TypedProgram, TypedReset, TypedSignal, TypedTestbench, TypedTestbenchClock, TypedTestbenchStmt,
+    UnaryOp, WidthExpr,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +88,10 @@ pub enum SemanticErrorKind {
     InvalidConcatOperand,
     ConcatWidthOverflow,
     InvalidReverseBitsSource,
+    InvalidStaticBitMotionSource,
+    InvalidStaticBitMotionSignedness,
+    StaticBitMotionAmountOutOfRange,
+    StaticBitMotionAmountRangeUnknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1090,6 +1095,24 @@ fn check_expr(
             width,
         } => check_slice(value, offset, width, context, expr.span)?,
         Expr::Concat { values } => check_concat(values, context, expr.span)?,
+        Expr::StaticBitMotion {
+            kind,
+            value,
+            amount,
+        } => {
+            let kind = match kind {
+                StaticBitMotionSyntaxKind::ShiftLeft => StaticBitMotionKind::ShiftLeft,
+                StaticBitMotionSyntaxKind::ShiftRightLogical => {
+                    StaticBitMotionKind::ShiftRightLogical
+                }
+                StaticBitMotionSyntaxKind::ShiftRightArithmetic => {
+                    StaticBitMotionKind::ShiftRightArithmetic
+                }
+                StaticBitMotionSyntaxKind::RotateLeft => StaticBitMotionKind::RotateLeft,
+                StaticBitMotionSyntaxKind::RotateRight => StaticBitMotionKind::RotateRight,
+            };
+            check_static_bit_motion(kind, value, amount, context, expr.span)?
+        }
     };
     if let Some(expected) = expected
         && &typed.ty != expected
@@ -1101,6 +1124,67 @@ fn check_expr(
         ));
     }
     Ok(typed)
+}
+
+fn check_static_bit_motion(
+    kind: StaticBitMotionKind,
+    value: &Spanned<Expr>,
+    amount: &Spanned<ConstExprAst>,
+    context: &ModuleContext,
+    span: Span,
+) -> Result<TypedExpr, SemanticError> {
+    let value = check_expr(value, None, context)?;
+    let (signed, source_width) = vector_parts(&value.ty).ok_or_else(|| {
+        SemanticError::new(
+            SemanticErrorKind::InvalidStaticBitMotionSource,
+            "shift and rotate source must be an unsigned or signed vector",
+            value.span,
+        )
+    })?;
+    if kind == StaticBitMotionKind::ShiftRightLogical && signed {
+        return Err(SemanticError::new(
+            SemanticErrorKind::InvalidStaticBitMotionSignedness,
+            "shift-right-logical requires an unsigned vector",
+            value.span,
+        ));
+    }
+    if kind == StaticBitMotionKind::ShiftRightArithmetic && !signed {
+        return Err(SemanticError::new(
+            SemanticErrorKind::InvalidStaticBitMotionSignedness,
+            "shift-right-arithmetic requires a signed vector",
+            value.span,
+        ));
+    }
+    let amount_span = amount.span;
+    let amount = normalize_width(resolve_const(amount, &context.generics)?)?;
+    let end = normalize_width(WidthExpr::Add(
+        Box::new(amount.clone()),
+        Box::new(WidthExpr::Constant(1)),
+    ))?;
+    if !prove_ge(&source_width, &end, &context.generics)? {
+        let definitely_out = matches!(
+            (&source_width, &amount),
+            (WidthExpr::Constant(width), WidthExpr::Constant(amount)) if amount >= width
+        );
+        return Err(SemanticError::new(
+            if definitely_out {
+                SemanticErrorKind::StaticBitMotionAmountOutOfRange
+            } else {
+                SemanticErrorKind::StaticBitMotionAmountRangeUnknown
+            },
+            "cannot prove that shift or rotate amount is less than source width",
+            amount_span,
+        ));
+    }
+    Ok(TypedExpr {
+        kind: TypedExprKind::StaticBitMotion {
+            kind,
+            value: Box::new(value.clone()),
+            amount,
+        },
+        ty: value.ty,
+        span,
+    })
 }
 
 fn check_call(
@@ -1497,14 +1581,27 @@ fn prove_ge(
     let mut small_terms = Vec::new();
     flatten_add(big, &mut big_terms);
     flatten_add(small, &mut small_terms);
+    let mut unmatched_small = Vec::new();
     for term in small_terms {
         if let Some(index) = big_terms.iter().position(|candidate| **candidate == *term) {
             big_terms.remove(index);
         } else {
-            return Ok(false);
+            unmatched_small.push(term);
         }
     }
-    Ok(true)
+    if unmatched_small.is_empty() {
+        return Ok(true);
+    }
+    let constant_sum = |terms: &[&WidthExpr]| {
+        terms.iter().try_fold(0_u64, |sum, term| match term {
+            WidthExpr::Constant(value) => sum.checked_add(*value),
+            _ => None,
+        })
+    };
+    Ok(matches!(
+        (constant_sum(&big_terms), constant_sum(&unmatched_small)),
+        (Some(big), Some(small)) if big >= small
+    ))
 }
 fn flatten_add<'a>(expr: &'a WidthExpr, out: &mut Vec<&'a WidthExpr>) {
     if let WidthExpr::Add(a, b) = expr {
@@ -1542,6 +1639,7 @@ fn type_hint(expr: &Spanned<Expr>, context: &ModuleContext) -> Option<HardwareTy
             .ok()
             .and_then(unsigned_width_type),
         Expr::Concat { values } => concat_hint(values, context),
+        Expr::StaticBitMotion { value, .. } => type_hint(value, context),
         Expr::Call { callee, arguments } => match callee.name.as_str() {
             "=" | "/=" | "<" | "<=" | ">" | ">=" => Some(HardwareType::Bit),
             "not" => arguments.first().and_then(|arg| type_hint(arg, context)),

@@ -1,0 +1,3 @@
+(module shift-right-logical-example
+  (ports (input :in (unsigned 8)) (value :out (unsigned 8)))
+  (assign value (shift-right-logical input 1)))

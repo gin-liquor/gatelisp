@@ -1,0 +1,20 @@
+(module shift-rotate-dut
+  (ports
+    (unsigned-input :in (unsigned 8)) (signed-input :in (signed 8))
+    (left-value :out (unsigned 8)) (logical-right :out (unsigned 8))
+    (arithmetic-right :out (signed 8)) (rotated-left :out (unsigned 8))
+    (rotated-right :out (unsigned 8)))
+  (assign left-value (shift-left unsigned-input 2))
+  (assign logical-right (shift-right-logical unsigned-input 1))
+  (assign arithmetic-right (shift-right-arithmetic signed-input 1))
+  (assign rotated-left (rotate-left unsigned-input 1))
+  (assign rotated-right (rotate-right unsigned-input 1)))
+(testbench shift-rotate-test
+  (target shift-rotate-dut)
+  (stimulus
+    (drive unsigned-input 129) (drive signed-input -128) (wait 1 ns)
+    (assert (= left-value 4) "left shift")
+    (assert (= logical-right 64) "logical right")
+    (assert (= arithmetic-right -64) "arithmetic right")
+    (assert (= rotated-left 3) "rotate left")
+    (assert (= rotated-right 192) "rotate right")))
