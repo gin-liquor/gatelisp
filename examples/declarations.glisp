@@ -1,0 +1,11 @@
+(module declarations
+  (ports
+    (clk   :in bit)
+    (input :in (unsigned 8))
+    (value :out (unsigned 8)))
+
+  (wire incremented (unsigned 8))
+  (reg count (unsigned 8) 0)
+
+  (assign incremented (+ input 1))
+  (assign value count))
