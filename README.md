@@ -13,8 +13,8 @@ three distinct representations:
 → VHDL-2008
 ```
 
-The syntax AST supports modules containing `ports`, `wire`, `reg`, and
-`assign`. Hardware types are `bit`, `(unsigned width)`, and `(signed width)`.
+The syntax AST supports modules containing `ports`, `wire`, `reg`, `assign`,
+`clocked`, and `instance`. Hardware types are `bit`, `(unsigned width)`, and `(signed width)`.
 The semantic analyzer resolves every signal to a `SignalId`, rejects duplicate
 or undeclared signals and invalid drivers, and converts built-in operators to
 typed enums.
@@ -92,6 +92,36 @@ Generated names use stable IDs plus a lowercase ASCII-sanitized source name,
 such as `gl_m0_and_gate`, `gl_p0_clk`, and `gl_s4_count`. IDs guarantee that
 case-only differences, reserved words, Unicode, and punctuation cannot collide.
 
+## Module hierarchy
+
+Modules instantiate another module declared anywhere in the same program with
+named port connections:
+
+```lisp
+(instance gate0 and-gate
+  (ports
+    (a left)
+    (b right)
+    (y result)))
+```
+
+Every target port must be connected exactly once; connection order is free and
+is normalized to the child's declaration order. Actuals are currently signal
+symbols only. Child inputs may read any parent port, wire, or register. Child
+outputs may drive only parent outputs and wires. Types must match exactly, and
+an instance output is a driver, so it cannot share its actual with an `assign`
+or another instance output.
+
+Instance names are case-sensitive and occupy a namespace separate from signals.
+Target resolution does not depend on module declaration order. Recursive module
+dependencies are rejected; VHDL design units are emitted in a stable,
+child-before-parent topological order, followed by testbenches. Instances use
+VHDL entity direct instantiation and named port maps, so existing testbenches can
+exercise a hierarchical top module.
+
+Generics, constant or expression actuals, external modules, and cross-file
+module lookup are not implemented yet.
+
 ## Testbenches and simulation
 
 GateLisp sources may contain top-level `testbench` forms alongside modules. A
@@ -130,6 +160,5 @@ Source files use the `.glisp` extension. `Position::offset` is a zero-based
 UTF-8 byte offset. Line and column numbers are one-based, columns count Unicode
 scalar values, and spans are half-open.
 
-FSMs, general module instances, generics, macros, random stimulus, file I/O, and
-CDC analysis are not implemented. The DUT instance emitted inside a generated
-testbench is backend-only; synchronizers are not inserted automatically.
+FSMs, generics, macros, random stimulus, file I/O, and CDC analysis are not
+implemented. Synchronizers are not inserted automatically.

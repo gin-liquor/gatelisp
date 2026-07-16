@@ -1,9 +1,10 @@
 use std::fmt;
 
 use crate::{
-    AssignStmt, ClockedDecl, Expr, Identifier, ModuleDecl, ModuleItem, NextStmt, PortDecl,
-    PortDirection, Program, RegisterDecl, ResetDecl, ResetKind, SExpr, Span, Spanned,
-    TestbenchClockDecl, TestbenchDecl, TestbenchStmt, TimeLiteral, TimeUnit, TypeExpr, WireDecl,
+    AssignStmt, ClockedDecl, Expr, Identifier, InstanceDecl, ModuleDecl, ModuleItem, NextStmt,
+    PortConnection, PortDecl, PortDirection, Program, RegisterDecl, ResetDecl, ResetKind, SExpr,
+    Span, Spanned, TestbenchClockDecl, TestbenchDecl, TestbenchStmt, TimeLiteral, TimeUnit,
+    TypeExpr, WireDecl,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +62,13 @@ pub enum GateParseErrorKind {
     InvalidWaitRising,
     InvalidAssert,
     InvalidAssertMessage,
+    InvalidInstance,
+    InvalidInstanceName,
+    InvalidInstanceModule,
+    InvalidInstancePorts,
+    InvalidPortConnection,
+    InvalidFormalPort,
+    InvalidActualSignal,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -303,6 +311,7 @@ fn parse_item(expression: &Spanned<SExpr>) -> Result<Spanned<ModuleItem>, GatePa
         "reg" => ModuleItem::Register(parse_register(expression)?),
         "assign" => ModuleItem::Assign(parse_assign(expression)?),
         "clocked" => ModuleItem::Clocked(parse_clocked(expression)?),
+        "instance" => ModuleItem::Instance(parse_instance(expression)?),
         "ports" => {
             return Err(error(
                 GateParseErrorKind::InvalidPortsPosition,
@@ -321,6 +330,67 @@ fn parse_item(expression: &Spanned<SExpr>) -> Result<Spanned<ModuleItem>, GatePa
     Ok(Spanned {
         value,
         span: expression.span,
+    })
+}
+
+fn parse_instance(expression: &Spanned<SExpr>) -> Result<InstanceDecl, GateParseError> {
+    let list = exact_list(
+        expression,
+        4,
+        GateParseErrorKind::InvalidInstance,
+        "instance form must have four elements",
+    )?;
+    let name = identifier(
+        &list[1],
+        GateParseErrorKind::InvalidInstanceName,
+        "instance name must be a symbol",
+    )?;
+    let module = identifier(
+        &list[2],
+        GateParseErrorKind::InvalidInstanceModule,
+        "instance module must be a symbol",
+    )?;
+    let ports = match &list[3].value {
+        SExpr::List(values) if is_symbol(values.first(), "ports") => values,
+        _ => {
+            return Err(error(
+                GateParseErrorKind::InvalidInstancePorts,
+                "instance requires one ports form",
+                &list[3],
+            ));
+        }
+    };
+    let connections = ports[1..]
+        .iter()
+        .map(|connection| {
+            let values = exact_list(
+                connection,
+                2,
+                GateParseErrorKind::InvalidPortConnection,
+                "port connection must have two elements",
+            )?;
+            Ok(Spanned {
+                value: PortConnection {
+                    formal: identifier(
+                        &values[0],
+                        GateParseErrorKind::InvalidFormalPort,
+                        "formal port must be a symbol",
+                    )?,
+                    actual: identifier(
+                        &values[1],
+                        GateParseErrorKind::InvalidActualSignal,
+                        "actual connection must be a signal symbol",
+                    )?,
+                },
+                span: connection.span,
+            })
+        })
+        .collect::<Result<Vec<_>, GateParseError>>()?;
+    Ok(InstanceDecl {
+        name,
+        module,
+        ports_span: list[3].span,
+        ports: connections,
     })
 }
 

@@ -89,6 +89,10 @@ fn concurrent(out: &mut String, statement: &VhdlConcurrentStatement) {
             entity,
             ports,
         } => {
+            if ports.is_empty() {
+                let _ = writeln!(out, "  {} : entity work.{};", label.0, entity.0);
+                return;
+            }
             let _ = writeln!(out, "  {} : entity work.{}", label.0, entity.0);
             out.push_str("    port map (\n");
             for (index, (formal, actual)) in ports.iter().enumerate() {

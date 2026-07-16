@@ -1,0 +1,8 @@
+(module counter-child
+  (ports (clk :in bit) (rst :in bit) (q :out (unsigned 8)))
+  (reg count (unsigned 8) 0)
+  (clocked clk (reset :sync rst (next count 0)) (next count (+ count 1)))
+  (assign q count))
+(module counter-top
+  (ports (clk :in bit) (rst :in bit) (q :out (unsigned 8)))
+  (instance counter0 counter-child (ports (clk clk) (rst rst) (q q))))

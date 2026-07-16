@@ -1,6 +1,6 @@
 use crate::{
-    BinaryOp, ClockEdge, HardwareType, ModuleId, ResetKind, SignalId, SignalKind, TimeUnit,
-    TypedClockedBlock, TypedExpr, TypedExprKind, TypedModule, TypedNext, TypedProgram,
+    BinaryOp, ClockEdge, HardwareType, ModuleId, PortDirection, ResetKind, SignalId, SignalKind,
+    TimeUnit, TypedClockedBlock, TypedExpr, TypedExprKind, TypedModule, TypedNext, TypedProgram,
     TypedTestbench, TypedTestbenchStmt, UnaryOp, VhdlArchitecture, VhdlConcurrentStatement,
     VhdlDeclaration, VhdlDesign, VhdlDesignUnit, VhdlEntity, VhdlExpression, VhdlIdentifier,
     VhdlPort, VhdlPortMode, VhdlProcess, VhdlSensitivity, VhdlSequentialStatement, VhdlType,
@@ -54,8 +54,18 @@ struct LowerContext {
 
 pub fn lower_to_vhdl(program: &TypedProgram) -> Result<VhdlDesign, VhdlBackendError> {
     let mut units = Vec::new();
-    for module in &program.modules {
-        let (entity, architecture) = lower_module(module)?;
+    for module_id in &program.module_order {
+        let module = program
+            .modules
+            .iter()
+            .find(|module| module.id == *module_id)
+            .ok_or_else(|| {
+                VhdlBackendError::new(
+                    VhdlBackendErrorKind::InconsistentId,
+                    "module_order contains unknown ModuleId",
+                )
+            })?;
+        let (entity, architecture) = lower_module(module, &program.modules)?;
         units.push(VhdlDesignUnit::Entity(entity));
         units.push(VhdlDesignUnit::Architecture(architecture));
     }
@@ -77,7 +87,10 @@ pub fn lower_to_vhdl(program: &TypedProgram) -> Result<VhdlDesign, VhdlBackendEr
     Ok(VhdlDesign { units })
 }
 
-fn lower_module(module: &TypedModule) -> Result<(VhdlEntity, VhdlArchitecture), VhdlBackendError> {
+fn lower_module(
+    module: &TypedModule,
+    modules: &[TypedModule],
+) -> Result<(VhdlEntity, VhdlArchitecture), VhdlBackendError> {
     let entity_name = module_name(module.id, &module.name);
     let mut ports = Vec::new();
     let mut declarations = Vec::new();
@@ -187,6 +200,85 @@ fn lower_module(module: &TypedModule) -> Result<(VhdlEntity, VhdlArchitecture), 
         statements.push(VhdlConcurrentStatement::Process(lower_clocked(
             block, &names,
         )?));
+    }
+    for instance in &module.instances {
+        let target = modules
+            .iter()
+            .find(|target| target.id == instance.target_module)
+            .ok_or_else(|| {
+                VhdlBackendError::new(
+                    VhdlBackendErrorKind::InconsistentId,
+                    "TypedInstance target ModuleId is missing",
+                )
+            })?;
+        let mut ports = Vec::new();
+        for connection in &instance.connections {
+            let formal = target
+                .signals
+                .iter()
+                .find(|signal| signal.id == connection.formal)
+                .ok_or_else(|| {
+                    VhdlBackendError::new(
+                        VhdlBackendErrorKind::MissingSignal,
+                        "formal SignalId is missing",
+                    )
+                })?;
+            if !matches!(formal.kind, SignalKind::Input | SignalKind::Output) {
+                return Err(VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidSignalKind,
+                    "formal SignalId is not a port",
+                ));
+            }
+            let formal_direction = match formal.kind {
+                SignalKind::Input => PortDirection::Input,
+                SignalKind::Output => PortDirection::Output,
+                _ => {
+                    return Err(VhdlBackendError::new(
+                        VhdlBackendErrorKind::InvalidSignalKind,
+                        "formal SignalId is not a port",
+                    ));
+                }
+            };
+            if connection.direction != formal_direction || connection.ty != formal.ty {
+                return Err(VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "instance connection disagrees with its formal port",
+                ));
+            }
+            let actual_signal = module
+                .signals
+                .iter()
+                .find(|signal| signal.id == connection.actual)
+                .ok_or_else(|| {
+                    VhdlBackendError::new(
+                        VhdlBackendErrorKind::MissingSignal,
+                        "actual SignalId is missing",
+                    )
+                })?;
+            if actual_signal.ty != connection.ty
+                || (connection.direction == PortDirection::Output
+                    && !matches!(actual_signal.kind, SignalKind::Output | SignalKind::Wire))
+            {
+                return Err(VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "instance actual is incompatible with its formal port",
+                ));
+            }
+            let actual = signal_name(&names, connection.actual)?.read.clone();
+            ports.push((
+                VhdlIdentifier(format!("gl_p{}_{}", formal.id.0, sanitize(&formal.name))),
+                actual,
+            ));
+        }
+        statements.push(VhdlConcurrentStatement::EntityInstance {
+            label: VhdlIdentifier(format!(
+                "gl_i{}_{}",
+                instance.id.0,
+                sanitize(&instance.name)
+            )),
+            entity: module_name(target.id, &target.name),
+            ports,
+        });
     }
     for signal in &module.signals {
         if matches!(signal.kind, SignalKind::Output) {

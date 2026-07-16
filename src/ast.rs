@@ -94,6 +94,21 @@ pub enum ModuleItem {
     Register(RegisterDecl),
     Assign(AssignStmt),
     Clocked(ClockedDecl),
+    Instance(InstanceDecl),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct InstanceDecl {
+    pub name: Identifier,
+    pub module: Identifier,
+    pub ports_span: Span,
+    pub ports: Vec<Spanned<PortConnection>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PortConnection {
+    pub formal: Identifier,
+    pub actual: Identifier,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -12,6 +12,9 @@ pub struct ClockedBlockId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TestbenchId(pub u32);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InstanceId(pub u32);
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum HardwareType {
     Bit,
@@ -23,6 +26,7 @@ pub enum HardwareType {
 pub struct TypedProgram {
     pub modules: Vec<TypedModule>,
     pub testbenches: Vec<TypedTestbench>,
+    pub module_order: Vec<ModuleId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -79,6 +83,25 @@ pub struct TypedModule {
     pub signals: Vec<TypedSignal>,
     pub assignments: Vec<TypedAssign>,
     pub clocked_blocks: Vec<TypedClockedBlock>,
+    pub instances: Vec<TypedInstance>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedInstance {
+    pub id: InstanceId,
+    pub name: String,
+    pub target_module: ModuleId,
+    pub connections: Vec<TypedPortConnection>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedPortConnection {
+    pub formal: SignalId,
+    pub actual: SignalId,
+    pub direction: crate::PortDirection,
+    pub ty: HardwareType,
     pub span: Span,
 }
 

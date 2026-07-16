@@ -27,6 +27,15 @@ fn generated_vhdl_matches_golden_files() {
             "swap_registers",
             include_str!("golden/swap_registers.expected.vhd"),
         ),
+        ("hierarchy", include_str!("golden/hierarchy.expected.vhd")),
+        (
+            "hierarchy_test",
+            include_str!("golden/hierarchy_test.expected.vhd"),
+        ),
+        (
+            "register_child",
+            include_str!("golden/register_child.expected.vhd"),
+        ),
     ] {
         assert_eq!(
             compile_example(name).replace("\r\n", "\n"),
@@ -144,8 +153,10 @@ fn rejects_nonliteral_initializers_and_invalid_hir() {
             }],
             assignments: vec![],
             clocked_blocks: vec![],
+            instances: vec![],
         }],
         testbenches: vec![],
+        module_order: vec![ModuleId(0)],
     };
     assert_eq!(
         lower_to_vhdl(&invalid).unwrap_err().kind,
@@ -160,6 +171,7 @@ fn rejects_nonliteral_initializers_and_invalid_hir() {
             span,
             signals: vec![],
             clocked_blocks: vec![],
+            instances: vec![],
             assignments: vec![gatelisp::TypedAssign {
                 target: SignalId(99),
                 value: TypedExpr {
@@ -171,6 +183,7 @@ fn rejects_nonliteral_initializers_and_invalid_hir() {
             }],
         }],
         testbenches: vec![],
+        module_order: vec![ModuleId(0)],
     };
     assert_eq!(
         lower_to_vhdl(&missing).unwrap_err().kind,

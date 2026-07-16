@@ -4,11 +4,12 @@ use std::{
 };
 
 use crate::{
-    BinaryOp, ClockEdge, ClockedBlockId, ClockedDecl, Expr, HardwareType, ModuleDecl, ModuleId,
-    ModuleItem, NextStmt, PortDirection, Program, SignalId, SignalKind, SimulationTime, Span,
-    Spanned, TestbenchDecl, TestbenchId, TestbenchStmt, TypeExpr, TypedAssign, TypedClockedBlock,
-    TypedExpr, TypedExprKind, TypedModule, TypedNext, TypedProgram, TypedReset, TypedSignal,
-    TypedTestbench, TypedTestbenchClock, TypedTestbenchStmt, UnaryOp,
+    BinaryOp, ClockEdge, ClockedBlockId, ClockedDecl, Expr, HardwareType, InstanceId, ModuleDecl,
+    ModuleId, ModuleItem, NextStmt, PortDirection, Program, SignalId, SignalKind, SimulationTime,
+    Span, Spanned, TestbenchDecl, TestbenchId, TestbenchStmt, TypeExpr, TypedAssign,
+    TypedClockedBlock, TypedExpr, TypedExprKind, TypedInstance, TypedModule, TypedNext,
+    TypedPortConnection, TypedProgram, TypedReset, TypedSignal, TypedTestbench,
+    TypedTestbenchClock, TypedTestbenchStmt, UnaryOp,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +54,17 @@ pub enum SemanticErrorKind {
     InvalidTestbenchReference,
     InvalidAssertType,
     UnknownWaitClock,
+    DuplicateInstance,
+    UnknownInstanceModule,
+    UnknownFormalPort,
+    DuplicateFormalPort,
+    MissingFormalPort,
+    UnknownActualSignal,
+    InstanceInputTypeMismatch,
+    InstanceOutputTypeMismatch,
+    InvalidInstanceOutputTarget,
+    InstanceMultipleDriver,
+    RecursiveModule,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +148,9 @@ pub fn analyze_program(program: &Program) -> Result<TypedProgram, SemanticError>
             &mut next_clocked,
         )?);
     }
+    let mut next_instance = 0_u32;
+    resolve_instances(program, &mut modules, &mut next_instance)?;
+    let module_order = topological_order(&modules)?;
     let module_indexes = modules
         .iter()
         .enumerate()
@@ -183,7 +198,287 @@ pub fn analyze_program(program: &Program) -> Result<TypedProgram, SemanticError>
     Ok(TypedProgram {
         modules,
         testbenches,
+        module_order,
     })
+}
+
+fn resolve_instances(
+    program: &Program,
+    modules: &mut [TypedModule],
+    next_id: &mut u32,
+) -> Result<(), SemanticError> {
+    let module_names = modules
+        .iter()
+        .enumerate()
+        .map(|(index, module)| (module.name.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let snapshot = modules.to_vec();
+    for (parent_index, source_module) in program.modules.iter().enumerate() {
+        let parent_snapshot = snapshot.get(parent_index).ok_or_else(|| {
+            SemanticError::new(
+                SemanticErrorKind::UnknownInstanceModule,
+                "parent module is missing",
+                source_module.span,
+            )
+        })?;
+        let mut instance_names = HashMap::new();
+        let mut drivers = parent_snapshot
+            .assignments
+            .iter()
+            .map(|assignment| (assignment.target, assignment.span))
+            .collect::<HashMap<_, _>>();
+        let mut typed_instances = Vec::new();
+        for item in &source_module.value.items {
+            let ModuleItem::Instance(instance) = &item.value else {
+                continue;
+            };
+            if let Some(previous) =
+                instance_names.insert(instance.name.name.clone(), instance.name.span)
+            {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::DuplicateInstance,
+                    format!("duplicate instance `{}`", instance.name.name),
+                    instance.name.span,
+                )
+                .related(previous));
+            }
+            let target_index = *module_names.get(&instance.module.name).ok_or_else(|| {
+                SemanticError::new(
+                    SemanticErrorKind::UnknownInstanceModule,
+                    format!("unknown instance module `{}`", instance.module.name),
+                    instance.module.span,
+                )
+            })?;
+            let target = snapshot.get(target_index).ok_or_else(|| {
+                SemanticError::new(
+                    SemanticErrorKind::UnknownInstanceModule,
+                    "instance target index is invalid",
+                    instance.module.span,
+                )
+            })?;
+            let ports = target
+                .signals
+                .iter()
+                .filter(|signal| matches!(signal.kind, SignalKind::Input | SignalKind::Output))
+                .collect::<Vec<_>>();
+            let mut supplied = HashMap::new();
+            for connection in &instance.ports {
+                if supplied
+                    .insert(connection.value.formal.name.clone(), connection)
+                    .is_some()
+                {
+                    return Err(SemanticError::new(
+                        SemanticErrorKind::DuplicateFormalPort,
+                        format!(
+                            "formal port `{}` is connected more than once",
+                            connection.value.formal.name
+                        ),
+                        connection.value.formal.span,
+                    ));
+                }
+                if !ports
+                    .iter()
+                    .any(|port| port.name == connection.value.formal.name)
+                {
+                    return Err(SemanticError::new(
+                        SemanticErrorKind::UnknownFormalPort,
+                        format!("unknown formal port `{}`", connection.value.formal.name),
+                        connection.value.formal.span,
+                    ));
+                }
+            }
+            let mut connections = Vec::new();
+            for formal in ports {
+                let connection = supplied.get(&formal.name).ok_or_else(|| {
+                    SemanticError::new(
+                        SemanticErrorKind::MissingFormalPort,
+                        format!("missing connection for port `{}`", formal.name),
+                        instance.ports_span,
+                    )
+                })?;
+                let actual = parent_snapshot
+                    .signals
+                    .iter()
+                    .find(|signal| signal.name == connection.value.actual.name)
+                    .ok_or_else(|| {
+                        SemanticError::new(
+                            SemanticErrorKind::UnknownActualSignal,
+                            format!("unknown actual signal `{}`", connection.value.actual.name),
+                            connection.value.actual.span,
+                        )
+                    })?;
+                let direction = match formal.kind {
+                    SignalKind::Input => PortDirection::Input,
+                    SignalKind::Output => PortDirection::Output,
+                    _ => {
+                        return Err(SemanticError::new(
+                            SemanticErrorKind::UnknownFormalPort,
+                            "formal signal is not a port",
+                            connection.value.formal.span,
+                        ));
+                    }
+                };
+                if formal.ty != actual.ty {
+                    let kind = if direction == PortDirection::Input {
+                        SemanticErrorKind::InstanceInputTypeMismatch
+                    } else {
+                        SemanticErrorKind::InstanceOutputTypeMismatch
+                    };
+                    return Err(SemanticError::new(
+                        kind,
+                        "instance port and actual signal types differ",
+                        connection.span,
+                    ));
+                }
+                if direction == PortDirection::Output {
+                    if !matches!(actual.kind, SignalKind::Output | SignalKind::Wire) {
+                        return Err(SemanticError::new(
+                            SemanticErrorKind::InvalidInstanceOutputTarget,
+                            "child output must connect to parent output or wire",
+                            connection.value.actual.span,
+                        ));
+                    }
+                    if let Some(previous) = drivers.insert(actual.id, connection.span) {
+                        return Err(SemanticError::new(
+                            SemanticErrorKind::InstanceMultipleDriver,
+                            format!("multiple drivers for `{}`", actual.name),
+                            connection.value.actual.span,
+                        )
+                        .related(previous));
+                    }
+                }
+                connections.push(TypedPortConnection {
+                    formal: formal.id,
+                    actual: actual.id,
+                    direction,
+                    ty: formal.ty.clone(),
+                    span: connection.span,
+                });
+            }
+            let id = InstanceId(*next_id);
+            *next_id = next_id.checked_add(1).ok_or_else(|| {
+                SemanticError::new(
+                    SemanticErrorKind::CannotInferType,
+                    "too many instances",
+                    item.span,
+                )
+            })?;
+            typed_instances.push(TypedInstance {
+                id,
+                name: instance.name.name.clone(),
+                target_module: target.id,
+                connections,
+                span: item.span,
+            });
+        }
+        let parent = modules.get_mut(parent_index).ok_or_else(|| {
+            SemanticError::new(
+                SemanticErrorKind::UnknownInstanceModule,
+                "parent module is missing",
+                source_module.span,
+            )
+        })?;
+        parent.instances = typed_instances;
+    }
+    Ok(())
+}
+
+fn topological_order(modules: &[TypedModule]) -> Result<Vec<ModuleId>, SemanticError> {
+    let indexes = modules
+        .iter()
+        .enumerate()
+        .map(|(index, module)| (module.id, index))
+        .collect::<HashMap<_, _>>();
+    let mut state = vec![0_u8; modules.len()];
+    let mut order = Vec::new();
+    fn visit(
+        index: usize,
+        modules: &[TypedModule],
+        indexes: &HashMap<ModuleId, usize>,
+        state: &mut [u8],
+        order: &mut Vec<ModuleId>,
+    ) -> Result<(), SemanticError> {
+        if state.get(index) == Some(&2) {
+            return Ok(());
+        }
+        if state.get(index) == Some(&1) {
+            let module = modules.get(index).ok_or_else(|| {
+                SemanticError::new(
+                    SemanticErrorKind::RecursiveModule,
+                    "invalid dependency index",
+                    empty_span(),
+                )
+            })?;
+            return Err(SemanticError::new(
+                SemanticErrorKind::RecursiveModule,
+                format!("recursive module instantiation involving `{}`", module.name),
+                module.name_span,
+            ));
+        }
+        if let Some(value) = state.get_mut(index) {
+            *value = 1;
+        } else {
+            return Err(SemanticError::new(
+                SemanticErrorKind::RecursiveModule,
+                "invalid dependency state",
+                empty_span(),
+            ));
+        }
+        let module = modules.get(index).ok_or_else(|| {
+            SemanticError::new(
+                SemanticErrorKind::RecursiveModule,
+                "invalid dependency index",
+                empty_span(),
+            )
+        })?;
+        for instance in &module.instances {
+            let child = *indexes.get(&instance.target_module).ok_or_else(|| {
+                SemanticError::new(
+                    SemanticErrorKind::UnknownInstanceModule,
+                    "instance target ModuleId is missing",
+                    instance.span,
+                )
+            })?;
+            if state.get(child) == Some(&1) {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::RecursiveModule,
+                    format!(
+                        "recursive module instantiation: {} -> {}",
+                        module.name,
+                        modules.get(child).map_or("?", |value| value.name.as_str())
+                    ),
+                    instance.span,
+                )
+                .related(
+                    modules
+                        .get(child)
+                        .map_or(instance.span, |value| value.name_span),
+                ));
+            }
+            visit(child, modules, indexes, state, order)?;
+        }
+        if let Some(value) = state.get_mut(index) {
+            *value = 2;
+        }
+        order.push(module.id);
+        Ok(())
+    }
+    for index in 0..modules.len() {
+        visit(index, modules, &indexes, &mut state, &mut order)?;
+    }
+    Ok(order)
+}
+
+fn empty_span() -> Span {
+    let position = crate::Position {
+        offset: 0,
+        line: 1,
+        column: 1,
+    };
+    Span {
+        start: position,
+        end: position,
+    }
 }
 
 fn analyze_module(
@@ -296,6 +591,7 @@ fn analyze_module(
         signals,
         assignments,
         clocked_blocks,
+        instances: Vec::new(),
         span: module.span,
     })
 }
@@ -648,7 +944,7 @@ fn collect_signals(module: &ModuleDecl, next_id: &mut u32) -> Result<ModuleConte
                 item.span,
                 reg.initial.clone(),
             )?,
-            ModuleItem::Assign(_) | ModuleItem::Clocked(_) => {}
+            ModuleItem::Assign(_) | ModuleItem::Clocked(_) | ModuleItem::Instance(_) => {}
         }
     }
     Ok(context)

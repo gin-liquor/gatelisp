@@ -1,0 +1,16 @@
+(module and-gate
+  (ports (a :in bit) (b :in bit) (y :out bit))
+  (assign y (and a b)))
+(module invert
+  (ports (input :in bit) (output :out bit))
+  (assign output (not input)))
+(module hierarchy-top
+  (ports (a :in bit) (b :in bit) (y :out bit))
+  (wire and-result bit)
+  (instance and0 and-gate (ports (a a) (b b) (y and-result)))
+  (instance inv0 invert (ports (input and-result) (output y))))
+(testbench hierarchy-test
+  (target hierarchy-top)
+  (stimulus
+    (drive a 0) (drive b 0) (wait 1 ns) (assert (= y 1) "not (0 and 0)")
+    (drive a 1) (drive b 1) (wait 1 ns) (assert (= y 0) "not (1 and 1)")))
