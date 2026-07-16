@@ -119,8 +119,47 @@ child-before-parent topological order, followed by testbenches. Instances use
 VHDL entity direct instantiation and named port maps, so existing testbenches can
 exercise a hierarchical top module.
 
-Generics, constant or expression actuals, external modules, and cross-file
-module lookup are not implemented yet.
+Constant or expression port actuals, external modules, and cross-file module
+lookup are not implemented yet.
+
+## Generic widths
+
+Modules may declare compile-time `:natural` and `:positive` generics before
+their `ports` form. Defaults are required:
+
+```lisp
+(generics
+  (channels :natural 1)
+  (width :positive 8))
+```
+
+Vector widths accept generic references and compile-time `+` and `*`
+expressions, such as `(unsigned (+ width 1))`. Width expressions are normalized,
+resolved to `GenericId`s, and must be provably at least one for every permitted
+generic value. Generics are not runtime signals and cannot be read by `assign`
+or other runtime expressions.
+
+Instances use an optional named generic map before their port map:
+
+```lisp
+(instance bank0 register-bank
+  (generics (width parent-width))
+  (ports (input input-data) (value output-data)))
+```
+
+Bindings may contain literals, parent generics, `+`, and `*`. Omitted bindings
+use the target module's default. Child port types are substituted before exact
+port type checking. Testbench targets support the same `(generics ...)` form,
+and their generated signals and literal checks use the substituted widths.
+
+GateLisp does not specialize or duplicate generic modules. It emits VHDL entity
+generic clauses, named generic maps, symbolic vector ranges, and symbolic
+`resize` sizes. An integer used with a generic-width vector must fit at the
+minimum possible width.
+
+Boolean, string, and enum generics; subtraction and division in constant
+expressions; generate constructs; and reading generic values as runtime signals
+are not implemented.
 
 ## Testbenches and simulation
 

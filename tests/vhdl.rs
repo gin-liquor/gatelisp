@@ -36,6 +36,18 @@ fn generated_vhdl_matches_golden_files() {
             "register_child",
             include_str!("golden/register_child.expected.vhd"),
         ),
+        (
+            "generic_register",
+            include_str!("golden/generic_register.expected.vhd"),
+        ),
+        (
+            "generic_hierarchy",
+            include_str!("golden/generic_hierarchy.expected.vhd"),
+        ),
+        (
+            "generic_testbench",
+            include_str!("golden/generic_testbench.expected.vhd"),
+        ),
     ] {
         assert_eq!(
             compile_example(name).replace("\r\n", "\n"),
@@ -108,10 +120,12 @@ fn formatter_handles_empty_entity_multiple_units_and_is_clean() {
         units: vec![
             VhdlDesignUnit::Entity(VhdlEntity {
                 name: VhdlIdentifier("gl_m0_empty".into()),
+                generics: vec![],
                 ports: vec![],
             }),
             VhdlDesignUnit::Entity(VhdlEntity {
                 name: VhdlIdentifier("gl_m1_empty".into()),
+                generics: vec![],
                 ports: vec![],
             }),
         ],
@@ -143,6 +157,7 @@ fn rejects_nonliteral_initializers_and_invalid_hir() {
             id: ModuleId(0),
             name: "bad".into(),
             name_span: span,
+            generics: vec![],
             span,
             signals: vec![TypedSignal {
                 id: SignalId(0),
@@ -168,6 +183,7 @@ fn rejects_nonliteral_initializers_and_invalid_hir() {
             id: ModuleId(0),
             name: "bad".into(),
             name_span: span,
+            generics: vec![],
             span,
             signals: vec![],
             clocked_blocks: vec![],

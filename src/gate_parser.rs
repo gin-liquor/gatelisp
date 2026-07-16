@@ -1,10 +1,10 @@
 use std::fmt;
 
 use crate::{
-    AssignStmt, ClockedDecl, Expr, Identifier, InstanceDecl, ModuleDecl, ModuleItem, NextStmt,
-    PortConnection, PortDecl, PortDirection, Program, RegisterDecl, ResetDecl, ResetKind, SExpr,
-    Span, Spanned, TestbenchClockDecl, TestbenchDecl, TestbenchStmt, TimeLiteral, TimeUnit,
-    TypeExpr, WireDecl,
+    AssignStmt, ClockedDecl, ConstExprAst, Expr, GenericBinding, GenericDecl, GenericKindSyntax,
+    Identifier, InstanceDecl, ModuleDecl, ModuleItem, NextStmt, PortConnection, PortDecl,
+    PortDirection, Program, RegisterDecl, ResetDecl, ResetKind, SExpr, Span, Spanned,
+    TestbenchClockDecl, TestbenchDecl, TestbenchStmt, TimeLiteral, TimeUnit, TypeExpr, WireDecl,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +69,14 @@ pub enum GateParseErrorKind {
     InvalidPortConnection,
     InvalidFormalPort,
     InvalidActualSignal,
+    InvalidGenerics,
+    InvalidGenericDeclaration,
+    InvalidGenericName,
+    InvalidGenericKind,
+    InvalidGenericDefault,
+    InvalidGenericBinding,
+    InvalidGenericFormal,
+    InvalidConstExpression,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,7 +173,18 @@ fn parse_module(expression: &Spanned<SExpr>) -> Result<Spanned<ModuleDecl>, Gate
         GateParseErrorKind::InvalidModuleName,
         "module name must be a symbol",
     )?;
-    let ports_expr = list.get(2).ok_or_else(|| {
+    let mut index = 2;
+    let generics = if let Some(value) = list.get(index) {
+        if matches!(&value.value, SExpr::List(values) if is_symbol(values.first(), "generics")) {
+            index += 1;
+            parse_generics(value)?
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    let ports_expr = list.get(index).ok_or_else(|| {
         error(
             GateParseErrorKind::MissingPorts,
             "ports form is required after module name",
@@ -174,11 +193,16 @@ fn parse_module(expression: &Spanned<SExpr>) -> Result<Spanned<ModuleDecl>, Gate
     })?;
     let ports = parse_ports(ports_expr)?;
     let mut items = Vec::new();
-    for item in &list[3..] {
+    for item in &list[index + 1..] {
         items.push(parse_item(item)?);
     }
     Ok(Spanned {
-        value: ModuleDecl { name, ports, items },
+        value: ModuleDecl {
+            name,
+            generics,
+            ports,
+            items,
+        },
         span: expression.span,
     })
 }
@@ -237,11 +261,40 @@ fn parse_type(expression: &Spanned<SExpr>) -> Result<Spanned<TypeExpr>, GatePars
             if list.len() == 2
                 && (is_symbol(list.first(), "unsigned") || is_symbol(list.first(), "signed")) =>
         {
-            let width = parse_width(&list[1])?;
-            if is_symbol(list.first(), "unsigned") {
-                TypeExpr::Unsigned(width)
+            if let SExpr::Integer(value) = list[1].value {
+                if value == 0 {
+                    return Err(error(
+                        GateParseErrorKind::ZeroWidth,
+                        "type width must be greater than zero",
+                        &list[1],
+                    ));
+                }
+                if value < 0 {
+                    return Err(error(
+                        GateParseErrorKind::NegativeWidth,
+                        "type width cannot be negative",
+                        &list[1],
+                    ));
+                }
+                let width = u32::try_from(value).map_err(|_| {
+                    error(
+                        GateParseErrorKind::WidthOutOfRange,
+                        "type width exceeds u32",
+                        &list[1],
+                    )
+                })?;
+                if is_symbol(list.first(), "unsigned") {
+                    TypeExpr::Unsigned(width)
+                } else {
+                    TypeExpr::Signed(width)
+                }
             } else {
-                TypeExpr::Signed(width)
+                let width = parse_width(&list[1])?;
+                if is_symbol(list.first(), "unsigned") {
+                    TypeExpr::SymbolicUnsigned(width)
+                } else {
+                    TypeExpr::SymbolicSigned(width)
+                }
             }
         }
         _ => {
@@ -258,31 +311,150 @@ fn parse_type(expression: &Spanned<SExpr>) -> Result<Spanned<TypeExpr>, GatePars
     })
 }
 
-fn parse_width(expression: &Spanned<SExpr>) -> Result<u32, GateParseError> {
-    match expression.value {
-        SExpr::Integer(0) => Err(error(
-            GateParseErrorKind::ZeroWidth,
-            "type width must be greater than zero",
-            expression,
-        )),
-        SExpr::Integer(value) if value < 0 => Err(error(
-            GateParseErrorKind::NegativeWidth,
-            "type width cannot be negative",
-            expression,
-        )),
-        SExpr::Integer(value) => u32::try_from(value).map_err(|_| {
+fn parse_width(expression: &Spanned<SExpr>) -> Result<Spanned<ConstExprAst>, GateParseError> {
+    parse_const_expr(expression)
+}
+
+fn parse_generics(
+    expression: &Spanned<SExpr>,
+) -> Result<Vec<Spanned<GenericDecl>>, GateParseError> {
+    let values = match &expression.value {
+        SExpr::List(values) if is_symbol(values.first(), "generics") => values,
+        _ => {
+            return Err(error(
+                GateParseErrorKind::InvalidGenerics,
+                "invalid generics form",
+                expression,
+            ));
+        }
+    };
+    values[1..]
+        .iter()
+        .map(|decl| {
+            let parts = exact_list(
+                decl,
+                3,
+                GateParseErrorKind::InvalidGenericDeclaration,
+                "generic declaration must have three elements",
+            )?;
+            let name = identifier(
+                &parts[0],
+                GateParseErrorKind::InvalidGenericName,
+                "generic name must be a symbol",
+            )?;
+            let kind = match &parts[1].value {
+                SExpr::Keyword(v) if v == "natural" => GenericKindSyntax::Natural,
+                SExpr::Keyword(v) if v == "positive" => GenericKindSyntax::Positive,
+                _ => {
+                    return Err(error(
+                        GateParseErrorKind::InvalidGenericKind,
+                        "generic kind must be :natural or :positive",
+                        &parts[1],
+                    ));
+                }
+            };
+            let default = match parts[2].value {
+                SExpr::Integer(v) if v >= 0 => u64::try_from(v).map_err(|_| {
+                    error(
+                        GateParseErrorKind::InvalidGenericDefault,
+                        "generic default is out of range",
+                        &parts[2],
+                    )
+                })?,
+                _ => {
+                    return Err(error(
+                        GateParseErrorKind::InvalidGenericDefault,
+                        "generic default must be a non-negative integer",
+                        &parts[2],
+                    ));
+                }
+            };
+            Ok(Spanned {
+                value: GenericDecl {
+                    name,
+                    kind,
+                    default,
+                },
+                span: decl.span,
+            })
+        })
+        .collect()
+}
+
+fn parse_const_expr(expression: &Spanned<SExpr>) -> Result<Spanned<ConstExprAst>, GateParseError> {
+    let value = match &expression.value {
+        SExpr::Integer(v) if *v >= 0 => ConstExprAst::Integer(u64::try_from(*v).map_err(|_| {
             error(
-                GateParseErrorKind::WidthOutOfRange,
-                "type width exceeds u32",
+                GateParseErrorKind::InvalidConstExpression,
+                "constant is out of range",
                 expression,
             )
+        })?),
+        SExpr::Symbol(name) => ConstExprAst::Reference(Identifier {
+            name: name.clone(),
+            span: expression.span,
         }),
-        _ => Err(error(
-            GateParseErrorKind::InvalidType,
-            "type width must be an integer",
-            expression,
-        )),
-    }
+        SExpr::List(values)
+            if values.len() == 3
+                && (is_symbol(values.first(), "+") || is_symbol(values.first(), "*")) =>
+        {
+            let left = Box::new(parse_const_expr(&values[1])?);
+            let right = Box::new(parse_const_expr(&values[2])?);
+            if is_symbol(values.first(), "+") {
+                ConstExprAst::Add(left, right)
+            } else {
+                ConstExprAst::Multiply(left, right)
+            }
+        }
+        _ => {
+            return Err(error(
+                GateParseErrorKind::InvalidConstExpression,
+                "expected non-negative integer, generic, +, or *",
+                expression,
+            ));
+        }
+    };
+    Ok(Spanned {
+        value,
+        span: expression.span,
+    })
+}
+
+fn parse_generic_bindings(
+    expression: &Spanned<SExpr>,
+) -> Result<Vec<Spanned<GenericBinding>>, GateParseError> {
+    let values = match &expression.value {
+        SExpr::List(values) if is_symbol(values.first(), "generics") => values,
+        _ => {
+            return Err(error(
+                GateParseErrorKind::InvalidGenerics,
+                "invalid generic bindings",
+                expression,
+            ));
+        }
+    };
+    values[1..]
+        .iter()
+        .map(|binding| {
+            let parts = exact_list(
+                binding,
+                2,
+                GateParseErrorKind::InvalidGenericBinding,
+                "generic binding must have two elements",
+            )?;
+            Ok(Spanned {
+                value: GenericBinding {
+                    formal: identifier(
+                        &parts[0],
+                        GateParseErrorKind::InvalidGenericFormal,
+                        "generic formal must be a symbol",
+                    )?,
+                    value: parse_const_expr(&parts[1])?,
+                },
+                span: binding.span,
+            })
+        })
+        .collect()
 }
 
 fn parse_item(expression: &Spanned<SExpr>) -> Result<Spanned<ModuleItem>, GateParseError> {
@@ -334,12 +506,16 @@ fn parse_item(expression: &Spanned<SExpr>) -> Result<Spanned<ModuleItem>, GatePa
 }
 
 fn parse_instance(expression: &Spanned<SExpr>) -> Result<InstanceDecl, GateParseError> {
-    let list = exact_list(
-        expression,
-        4,
-        GateParseErrorKind::InvalidInstance,
-        "instance form must have four elements",
-    )?;
+    let list = match &expression.value {
+        SExpr::List(values) if matches!(values.len(), 4 | 5) => values,
+        _ => {
+            return Err(error(
+                GateParseErrorKind::InvalidInstance,
+                "instance form must have four or five elements",
+                expression,
+            ));
+        }
+    };
     let name = identifier(
         &list[1],
         GateParseErrorKind::InvalidInstanceName,
@@ -350,13 +526,18 @@ fn parse_instance(expression: &Spanned<SExpr>) -> Result<InstanceDecl, GateParse
         GateParseErrorKind::InvalidInstanceModule,
         "instance module must be a symbol",
     )?;
-    let ports = match &list[3].value {
+    let (generics_span, generics, ports_index) = if list.len() == 5 {
+        (Some(list[3].span), parse_generic_bindings(&list[3])?, 4)
+    } else {
+        (None, Vec::new(), 3)
+    };
+    let ports = match &list[ports_index].value {
         SExpr::List(values) if is_symbol(values.first(), "ports") => values,
         _ => {
             return Err(error(
                 GateParseErrorKind::InvalidInstancePorts,
                 "instance requires one ports form",
-                &list[3],
+                &list[ports_index],
             ));
         }
     };
@@ -389,7 +570,9 @@ fn parse_instance(expression: &Spanned<SExpr>) -> Result<InstanceDecl, GateParse
     Ok(InstanceDecl {
         name,
         module,
-        ports_span: list[3].span,
+        generics_span,
+        generics,
+        ports_span: list[ports_index].span,
         ports: connections,
     })
 }
@@ -722,7 +905,7 @@ fn parse_testbench(expression: &Spanned<SExpr>) -> Result<Spanned<TestbenchDecl>
             ));
         }
     };
-    if target_list.len() != 2 {
+    if !matches!(target_list.len(), 2 | 3) {
         return Err(error(
             GateParseErrorKind::InvalidTargetModule,
             "target form must name one module",
@@ -734,6 +917,11 @@ fn parse_testbench(expression: &Spanned<SExpr>) -> Result<Spanned<TestbenchDecl>
         GateParseErrorKind::InvalidTargetModule,
         "target module must be a symbol",
     )?;
+    let target_generics = if target_list.len() == 3 {
+        parse_generic_bindings(&target_list[2])?
+    } else {
+        Vec::new()
+    };
     let mut clocks = Vec::new();
     let mut stimulus = None;
     for item in &list[3..] {
@@ -799,6 +987,7 @@ fn parse_testbench(expression: &Spanned<SExpr>) -> Result<Spanned<TestbenchDecl>
         value: TestbenchDecl {
             name,
             target,
+            target_generics,
             clocks,
             stimulus,
         },

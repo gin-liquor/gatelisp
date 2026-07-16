@@ -10,6 +10,7 @@ pub struct Program {
 pub struct TestbenchDecl {
     pub name: Identifier,
     pub target: Identifier,
+    pub target_generics: Vec<Spanned<GenericBinding>>,
     pub clocks: Vec<Spanned<TestbenchClockDecl>>,
     pub stimulus: Vec<Spanned<TestbenchStmt>>,
 }
@@ -58,6 +59,7 @@ pub enum TestbenchStmt {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModuleDecl {
     pub name: Identifier,
+    pub generics: Vec<Spanned<GenericDecl>>,
     pub ports: Vec<Spanned<PortDecl>>,
     pub items: Vec<Spanned<ModuleItem>>,
 }
@@ -81,11 +83,40 @@ pub enum PortDirection {
     Output,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TypeExpr {
     Bit,
     Unsigned(u32),
     Signed(u32),
+    SymbolicUnsigned(Spanned<ConstExprAst>),
+    SymbolicSigned(Spanned<ConstExprAst>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenericKindSyntax {
+    Natural,
+    Positive,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GenericDecl {
+    pub name: Identifier,
+    pub kind: GenericKindSyntax,
+    pub default: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConstExprAst {
+    Integer(u64),
+    Reference(Identifier),
+    Add(Box<Spanned<ConstExprAst>>, Box<Spanned<ConstExprAst>>),
+    Multiply(Box<Spanned<ConstExprAst>>, Box<Spanned<ConstExprAst>>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GenericBinding {
+    pub formal: Identifier,
+    pub value: Spanned<ConstExprAst>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -101,6 +132,8 @@ pub enum ModuleItem {
 pub struct InstanceDecl {
     pub name: Identifier,
     pub module: Identifier,
+    pub generics_span: Option<Span>,
+    pub generics: Vec<Spanned<GenericBinding>>,
     pub ports_span: Span,
     pub ports: Vec<Spanned<PortConnection>>,
 }

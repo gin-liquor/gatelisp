@@ -1,0 +1,8 @@
+(module generic-expression
+  (generics
+    (channels :natural 1)
+    (width :positive 8))
+  (ports
+    (input :in (unsigned (* (+ channels 1) width)))
+    (value :out (unsigned (* (+ channels 1) width))))
+  (assign value input))

@@ -1,0 +1,21 @@
+(module generic-register
+  (generics
+    (width :positive 8))
+  (ports
+    (clk :in bit)
+    (input :in (unsigned width))
+    (value :out (unsigned width)))
+  (reg stored (unsigned width) 0)
+  (clocked clk
+    (next stored input))
+  (assign value stored))
+
+(testbench generic-register-test
+  (target generic-register
+    (generics
+      (width 16)))
+  (clock clk 10 ns)
+  (stimulus
+    (drive input 4660)
+    (wait-rising clk)
+    (assert (= value 4660) "generic 16-bit register")))

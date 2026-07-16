@@ -4,12 +4,13 @@ use std::{
 };
 
 use crate::{
-    BinaryOp, ClockEdge, ClockedBlockId, ClockedDecl, Expr, HardwareType, InstanceId, ModuleDecl,
-    ModuleId, ModuleItem, NextStmt, PortDirection, Program, SignalId, SignalKind, SimulationTime,
-    Span, Spanned, TestbenchDecl, TestbenchId, TestbenchStmt, TypeExpr, TypedAssign,
-    TypedClockedBlock, TypedExpr, TypedExprKind, TypedInstance, TypedModule, TypedNext,
-    TypedPortConnection, TypedProgram, TypedReset, TypedSignal, TypedTestbench,
-    TypedTestbenchClock, TypedTestbenchStmt, UnaryOp,
+    BinaryOp, ClockEdge, ClockedBlockId, ClockedDecl, ConstExprAst, Expr, GenericBinding,
+    GenericId, GenericKind, GenericKindSyntax, HardwareType, InstanceId, ModuleDecl, ModuleId,
+    ModuleItem, NextStmt, PortDirection, Program, SignalId, SignalKind, SimulationTime, Span,
+    Spanned, TestbenchDecl, TestbenchId, TestbenchStmt, TypeExpr, TypedAssign, TypedClockedBlock,
+    TypedExpr, TypedExprKind, TypedGeneric, TypedGenericBinding, TypedInstance, TypedModule,
+    TypedNext, TypedPortConnection, TypedProgram, TypedReset, TypedSignal, TypedTestbench,
+    TypedTestbenchClock, TypedTestbenchStmt, UnaryOp, WidthExpr,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +66,14 @@ pub enum SemanticErrorKind {
     InvalidInstanceOutputTarget,
     InstanceMultipleDriver,
     RecursiveModule,
+    DuplicateGeneric,
+    InvalidGenericDefault,
+    UnknownGeneric,
+    InvalidWidthExpression,
+    ConstExpressionOverflow,
+    UnknownInstanceGeneric,
+    DuplicateGenericBinding,
+    InvalidGenericActual,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,12 +126,14 @@ enum SignalClass {
 struct ModuleContext {
     signals: Vec<SignalInfo>,
     names: HashMap<String, usize>,
+    generics: Vec<TypedGeneric>,
 }
 
 pub fn analyze_program(program: &Program) -> Result<TypedProgram, SemanticError> {
     let mut module_names = HashMap::<&str, Span>::new();
     let mut next_signal = 0_u32;
     let mut next_clocked = 0_u32;
+    let mut next_generic = 0_u32;
     let mut modules = Vec::with_capacity(program.modules.len());
     for (index, module) in program.modules.iter().enumerate() {
         if let Some(previous) = module_names.insert(&module.value.name.name, module.value.name.span)
@@ -146,6 +157,7 @@ pub fn analyze_program(program: &Program) -> Result<TypedProgram, SemanticError>
             id,
             &mut next_signal,
             &mut next_clocked,
+            &mut next_generic,
         )?);
     }
     let mut next_instance = 0_u32;
@@ -256,6 +268,12 @@ fn resolve_instances(
                     instance.module.span,
                 )
             })?;
+            let generic_bindings = resolve_generic_bindings(
+                &instance.generics,
+                &parent_snapshot.generics,
+                &target.generics,
+                instance.generics_span.unwrap_or(item.span),
+            )?;
             let ports = target
                 .signals
                 .iter()
@@ -318,7 +336,8 @@ fn resolve_instances(
                         ));
                     }
                 };
-                if formal.ty != actual.ty {
+                let formal_ty = substitute_type(&formal.ty, &generic_bindings)?;
+                if formal_ty != actual.ty {
                     let kind = if direction == PortDirection::Input {
                         SemanticErrorKind::InstanceInputTypeMismatch
                     } else {
@@ -351,7 +370,7 @@ fn resolve_instances(
                     formal: formal.id,
                     actual: actual.id,
                     direction,
-                    ty: formal.ty.clone(),
+                    ty: formal_ty,
                     span: connection.span,
                 });
             }
@@ -367,6 +386,7 @@ fn resolve_instances(
                 id,
                 name: instance.name.name.clone(),
                 target_module: target.id,
+                generic_bindings,
                 connections,
                 span: item.span,
             });
@@ -486,8 +506,10 @@ fn analyze_module(
     id: ModuleId,
     next_id: &mut u32,
     next_clocked_id: &mut u32,
+    next_generic_id: &mut u32,
 ) -> Result<TypedModule, SemanticError> {
-    let context = collect_signals(&module.value, next_id)?;
+    let generics = collect_generics(&module.value, next_generic_id)?;
+    let context = collect_signals(&module.value, next_id, &generics)?;
     let mut signals = Vec::with_capacity(context.signals.len());
     for info in &context.signals {
         let kind = match info.class {
@@ -588,6 +610,7 @@ fn analyze_module(
         id,
         name: module.value.name.name.clone(),
         name_span: module.value.name.span,
+        generics,
         signals,
         assignments,
         clocked_blocks,
@@ -601,9 +624,16 @@ fn analyze_testbench(
     id: TestbenchId,
     module: &TypedModule,
 ) -> Result<TypedTestbench, SemanticError> {
+    let target_generic_bindings = resolve_generic_bindings(
+        &testbench.value.target_generics,
+        &[],
+        &module.generics,
+        testbench.value.target.span,
+    )?;
     let mut context = ModuleContext {
         signals: Vec::new(),
         names: HashMap::new(),
+        generics: Vec::new(),
     };
     for signal in &module.signals {
         let class = match signal.kind {
@@ -617,7 +647,7 @@ fn analyze_testbench(
         context.signals.push(SignalInfo {
             id: signal.id,
             name: signal.name.clone(),
-            ty: signal.ty.clone(),
+            ty: substitute_type(&signal.ty, &target_generic_bindings)?,
             class,
             declaration_span: signal.declaration_span,
             initial: None,
@@ -738,6 +768,7 @@ fn analyze_testbench(
         id,
         name: testbench.value.name.name.clone(),
         target: module.id,
+        target_generic_bindings,
         clocks,
         statements,
         span: testbench.span,
@@ -904,10 +935,15 @@ fn analyze_next(
     })
 }
 
-fn collect_signals(module: &ModuleDecl, next_id: &mut u32) -> Result<ModuleContext, SemanticError> {
+fn collect_signals(
+    module: &ModuleDecl,
+    next_id: &mut u32,
+    generics: &[TypedGeneric],
+) -> Result<ModuleContext, SemanticError> {
     let mut context = ModuleContext {
         signals: Vec::new(),
         names: HashMap::new(),
+        generics: generics.to_vec(),
     };
     for port in &module.ports {
         let class = match port.value.direction {
@@ -919,7 +955,7 @@ fn collect_signals(module: &ModuleDecl, next_id: &mut u32) -> Result<ModuleConte
             next_id,
             &port.value.name.name,
             class,
-            type_from_ast(&port.value.ty.value),
+            type_from_ast(&port.value.ty.value, generics)?,
             port.span,
             None,
         )?;
@@ -931,7 +967,7 @@ fn collect_signals(module: &ModuleDecl, next_id: &mut u32) -> Result<ModuleConte
                 next_id,
                 &wire.name.name,
                 SignalClass::Wire,
-                type_from_ast(&wire.ty.value),
+                type_from_ast(&wire.ty.value, generics)?,
                 item.span,
                 None,
             )?,
@@ -940,7 +976,7 @@ fn collect_signals(module: &ModuleDecl, next_id: &mut u32) -> Result<ModuleConte
                 next_id,
                 &reg.name.name,
                 SignalClass::Register,
-                type_from_ast(&reg.ty.value),
+                type_from_ast(&reg.ty.value, generics)?,
                 item.span,
                 reg.initial.clone(),
             )?,
@@ -1015,7 +1051,7 @@ fn check_expr(
                     expr.span,
                 )
             })?;
-            check_integer(*value, ty, expr.span)?;
+            check_integer(*value, ty, &context.generics, expr.span)?;
             TypedExpr {
                 kind: TypedExprKind::Integer(*value),
                 ty: ty.clone(),
@@ -1183,16 +1219,24 @@ fn type_hint(expr: &Spanned<Expr>, context: &ModuleContext) -> Option<HardwareTy
     }
 }
 
-fn check_integer(value: i64, ty: &HardwareType, span: Span) -> Result<(), SemanticError> {
+fn check_integer(
+    value: i64,
+    ty: &HardwareType,
+    generics: &[TypedGeneric],
+    span: Span,
+) -> Result<(), SemanticError> {
     let value = i128::from(value);
-    let fits = match *ty {
+    let fits = match ty {
         HardwareType::Bit => matches!(value, 0 | 1),
-        HardwareType::Unsigned(width) if width >= 64 => value >= 0,
-        HardwareType::Unsigned(width) => value >= 0 && value < (1_i128 << width),
-        HardwareType::Signed(width) if width >= 64 => true,
-        HardwareType::Signed(width) => {
-            let bound = 1_i128 << (width - 1);
-            value >= -bound && value < bound
+        HardwareType::Unsigned(width) => {
+            value >= 0 && u64::from(*width) >= unsigned_bits(value as u128)
+        }
+        HardwareType::Signed(width) => u64::from(*width) >= signed_bits(value),
+        HardwareType::SymbolicUnsigned(width) => {
+            value >= 0 && minimum_with_generics(width, generics)? >= unsigned_bits(value as u128)
+        }
+        HardwareType::SymbolicSigned(width) => {
+            minimum_with_generics(width, generics)? >= signed_bits(value)
         }
     };
     if fits {
@@ -1248,10 +1292,316 @@ fn lookup<'a>(context: &'a ModuleContext, name: &str) -> Option<&'a SignalInfo> 
         .get(name)
         .and_then(|index| context.signals.get(*index))
 }
-fn type_from_ast(ty: &TypeExpr) -> HardwareType {
-    match *ty {
-        TypeExpr::Bit => HardwareType::Bit,
-        TypeExpr::Unsigned(width) => HardwareType::Unsigned(width),
-        TypeExpr::Signed(width) => HardwareType::Signed(width),
+fn type_from_ast(ty: &TypeExpr, generics: &[TypedGeneric]) -> Result<HardwareType, SemanticError> {
+    match ty {
+        TypeExpr::Bit => Ok(HardwareType::Bit),
+        TypeExpr::Unsigned(width) => Ok(HardwareType::Unsigned(*width)),
+        TypeExpr::Signed(width) => Ok(HardwareType::Signed(*width)),
+        TypeExpr::SymbolicUnsigned(width) => Ok(HardwareType::SymbolicUnsigned(resolve_width(
+            width, generics,
+        )?)),
+        TypeExpr::SymbolicSigned(width) => Ok(HardwareType::SymbolicSigned(resolve_width(
+            width, generics,
+        )?)),
     }
+}
+
+fn collect_generics(
+    module: &ModuleDecl,
+    next: &mut u32,
+) -> Result<Vec<TypedGeneric>, SemanticError> {
+    let mut names = HashMap::new();
+    let mut result = Vec::new();
+    for generic in &module.generics {
+        if let Some(previous) =
+            names.insert(generic.value.name.name.clone(), generic.value.name.span)
+        {
+            return Err(SemanticError::new(
+                SemanticErrorKind::DuplicateGeneric,
+                format!("duplicate generic `{}`", generic.value.name.name),
+                generic.value.name.span,
+            )
+            .related(previous));
+        }
+        let kind = match generic.value.kind {
+            GenericKindSyntax::Natural => GenericKind::Natural,
+            GenericKindSyntax::Positive => GenericKind::Positive,
+        };
+        if kind == GenericKind::Positive && generic.value.default == 0 {
+            return Err(SemanticError::new(
+                SemanticErrorKind::InvalidGenericDefault,
+                "positive generic default must be at least one",
+                generic.span,
+            ));
+        }
+        let id = GenericId(*next);
+        *next = next.checked_add(1).ok_or_else(|| {
+            SemanticError::new(
+                SemanticErrorKind::CannotInferType,
+                "too many generics",
+                generic.span,
+            )
+        })?;
+        result.push(TypedGeneric {
+            id,
+            name: generic.value.name.name.clone(),
+            kind,
+            default: generic.value.default,
+            declaration_span: generic.span,
+        });
+    }
+    Ok(result)
+}
+
+fn resolve_width(
+    expr: &Spanned<ConstExprAst>,
+    generics: &[TypedGeneric],
+) -> Result<WidthExpr, SemanticError> {
+    let value = normalize_width(resolve_const(expr, generics)?)?;
+    if minimum_with_generics(&value, generics)? == 0 {
+        return Err(SemanticError::new(
+            SemanticErrorKind::InvalidWidthExpression,
+            "type width can be zero",
+            expr.span,
+        ));
+    }
+    Ok(value)
+}
+
+fn resolve_const(
+    expr: &Spanned<ConstExprAst>,
+    generics: &[TypedGeneric],
+) -> Result<WidthExpr, SemanticError> {
+    match &expr.value {
+        ConstExprAst::Integer(v) => Ok(WidthExpr::Constant(*v)),
+        ConstExprAst::Reference(id) => generics
+            .iter()
+            .find(|g| g.name == id.name)
+            .map(|g| WidthExpr::Generic(g.id))
+            .ok_or_else(|| {
+                SemanticError::new(
+                    SemanticErrorKind::UnknownGeneric,
+                    format!("unknown generic `{}`", id.name),
+                    id.span,
+                )
+            }),
+        ConstExprAst::Add(a, b) => Ok(WidthExpr::Add(
+            Box::new(resolve_const(a, generics)?),
+            Box::new(resolve_const(b, generics)?),
+        )),
+        ConstExprAst::Multiply(a, b) => Ok(WidthExpr::Multiply(
+            Box::new(resolve_const(a, generics)?),
+            Box::new(resolve_const(b, generics)?),
+        )),
+    }
+}
+
+fn resolve_generic_bindings(
+    source: &[Spanned<GenericBinding>],
+    parent: &[TypedGeneric],
+    target: &[TypedGeneric],
+    span: Span,
+) -> Result<Vec<TypedGenericBinding>, SemanticError> {
+    let mut supplied = HashMap::new();
+    for binding in source {
+        if !target.iter().any(|g| g.name == binding.value.formal.name) {
+            return Err(SemanticError::new(
+                SemanticErrorKind::UnknownInstanceGeneric,
+                format!("unknown target generic `{}`", binding.value.formal.name),
+                binding.value.formal.span,
+            ));
+        }
+        if supplied
+            .insert(binding.value.formal.name.clone(), binding)
+            .is_some()
+        {
+            return Err(SemanticError::new(
+                SemanticErrorKind::DuplicateGenericBinding,
+                "generic is bound more than once",
+                binding.value.formal.span,
+            ));
+        }
+    }
+    let mut result = Vec::new();
+    for formal in target {
+        let (value, uses_default, binding_span) = if let Some(binding) = supplied.get(&formal.name)
+        {
+            (
+                normalize_width(resolve_const(&binding.value.value, parent)?)?,
+                false,
+                binding.span,
+            )
+        } else {
+            (WidthExpr::Constant(formal.default), true, span)
+        };
+        let min = minimum_with_generics(&value, parent)?;
+        if formal.kind == GenericKind::Positive && min == 0 {
+            return Err(SemanticError::new(
+                SemanticErrorKind::InvalidGenericActual,
+                "positive generic actual can be zero",
+                binding_span,
+            ));
+        }
+        result.push(TypedGenericBinding {
+            formal: formal.id,
+            value,
+            uses_default,
+            span: binding_span,
+        });
+    }
+    Ok(result)
+}
+
+fn substitute_type(
+    ty: &HardwareType,
+    bindings: &[TypedGenericBinding],
+) -> Result<HardwareType, SemanticError> {
+    fn sub(expr: &WidthExpr, bindings: &[TypedGenericBinding]) -> Result<WidthExpr, SemanticError> {
+        match expr {
+            WidthExpr::Constant(v) => Ok(WidthExpr::Constant(*v)),
+            WidthExpr::Generic(id) => bindings
+                .iter()
+                .find(|b| b.formal == *id)
+                .map(|b| b.value.clone())
+                .ok_or_else(|| {
+                    SemanticError::new(
+                        SemanticErrorKind::UnknownGeneric,
+                        "generic substitution is incomplete",
+                        empty_span(),
+                    )
+                }),
+            WidthExpr::Add(a, b) => normalize_width(WidthExpr::Add(
+                Box::new(sub(a, bindings)?),
+                Box::new(sub(b, bindings)?),
+            )),
+            WidthExpr::Multiply(a, b) => normalize_width(WidthExpr::Multiply(
+                Box::new(sub(a, bindings)?),
+                Box::new(sub(b, bindings)?),
+            )),
+        }
+    }
+    match ty {
+        HardwareType::Bit => Ok(HardwareType::Bit),
+        HardwareType::Unsigned(w) => Ok(HardwareType::Unsigned(*w)),
+        HardwareType::Signed(w) => Ok(HardwareType::Signed(*w)),
+        HardwareType::SymbolicUnsigned(w) => match sub(w, bindings)? {
+            WidthExpr::Constant(v) if v <= u64::from(u32::MAX) => {
+                Ok(HardwareType::Unsigned(v as u32))
+            }
+            v => Ok(HardwareType::SymbolicUnsigned(v)),
+        },
+        HardwareType::SymbolicSigned(w) => match sub(w, bindings)? {
+            WidthExpr::Constant(v) if v <= u64::from(u32::MAX) => {
+                Ok(HardwareType::Signed(v as u32))
+            }
+            v => Ok(HardwareType::SymbolicSigned(v)),
+        },
+    }
+}
+
+fn normalize_width(expr: WidthExpr) -> Result<WidthExpr, SemanticError> {
+    match expr {
+        WidthExpr::Add(a, b) => {
+            let a = normalize_width(*a)?;
+            let b = normalize_width(*b)?;
+            match (&a, &b) {
+                (WidthExpr::Constant(x), WidthExpr::Constant(y)) => {
+                    x.checked_add(*y).map(WidthExpr::Constant).ok_or_else(|| {
+                        SemanticError::new(
+                            SemanticErrorKind::ConstExpressionOverflow,
+                            "constant addition overflow",
+                            empty_span(),
+                        )
+                    })
+                }
+                (WidthExpr::Constant(0), _) => Ok(b),
+                (_, WidthExpr::Constant(0)) => Ok(a),
+                _ => Ok(WidthExpr::Add(Box::new(a), Box::new(b))),
+            }
+        }
+        WidthExpr::Multiply(a, b) => {
+            let a = normalize_width(*a)?;
+            let b = normalize_width(*b)?;
+            match (&a, &b) {
+                (WidthExpr::Constant(x), WidthExpr::Constant(y)) => {
+                    x.checked_mul(*y).map(WidthExpr::Constant).ok_or_else(|| {
+                        SemanticError::new(
+                            SemanticErrorKind::ConstExpressionOverflow,
+                            "constant multiplication overflow",
+                            empty_span(),
+                        )
+                    })
+                }
+                (WidthExpr::Constant(0), _) | (_, WidthExpr::Constant(0)) => {
+                    Ok(WidthExpr::Constant(0))
+                }
+                (WidthExpr::Constant(1), _) => Ok(b),
+                (_, WidthExpr::Constant(1)) => Ok(a),
+                _ => Ok(WidthExpr::Multiply(Box::new(a), Box::new(b))),
+            }
+        }
+        value => Ok(value),
+    }
+}
+
+fn minimum_with_generics(
+    expr: &WidthExpr,
+    generics: &[TypedGeneric],
+) -> Result<u64, SemanticError> {
+    match expr {
+        WidthExpr::Generic(id) => generics
+            .iter()
+            .find(|g| g.id == *id)
+            .map(|g| {
+                if g.kind == GenericKind::Positive {
+                    1
+                } else {
+                    0
+                }
+            })
+            .ok_or_else(|| {
+                SemanticError::new(
+                    SemanticErrorKind::UnknownGeneric,
+                    "unknown GenericId",
+                    empty_span(),
+                )
+            }),
+        WidthExpr::Constant(v) => Ok(*v),
+        WidthExpr::Add(a, b) => minimum_with_generics(a, generics)?
+            .checked_add(minimum_with_generics(b, generics)?)
+            .ok_or_else(|| {
+                SemanticError::new(
+                    SemanticErrorKind::ConstExpressionOverflow,
+                    "minimum addition overflow",
+                    empty_span(),
+                )
+            }),
+        WidthExpr::Multiply(a, b) => minimum_with_generics(a, generics)?
+            .checked_mul(minimum_with_generics(b, generics)?)
+            .ok_or_else(|| {
+                SemanticError::new(
+                    SemanticErrorKind::ConstExpressionOverflow,
+                    "minimum multiplication overflow",
+                    empty_span(),
+                )
+            }),
+    }
+}
+fn unsigned_bits(v: u128) -> u64 {
+    if v == 0 {
+        1
+    } else {
+        (128 - v.leading_zeros()) as u64
+    }
+}
+fn signed_bits(v: i128) -> u64 {
+    for bits in 1..128 {
+        if let Some(bound) = 1_i128.checked_shl(bits - 1)
+            && v >= -bound
+            && v < bound
+        {
+            return bits.into();
+        }
+    }
+    128
 }

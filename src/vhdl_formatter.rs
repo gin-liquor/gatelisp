@@ -1,6 +1,6 @@
 use crate::{
     VhdlArchitecture, VhdlConcurrentStatement, VhdlDeclaration, VhdlDesign, VhdlDesignUnit,
-    VhdlEntity, VhdlExpression, VhdlPortMode, VhdlProcess, VhdlSensitivity,
+    VhdlEntity, VhdlExpression, VhdlGenericKind, VhdlPortMode, VhdlProcess, VhdlSensitivity,
     VhdlSequentialStatement, VhdlType,
 };
 use std::fmt::Write;
@@ -32,6 +32,26 @@ fn context(out: &mut String, simulation: bool) {
 
 fn entity(out: &mut String, value: &VhdlEntity) {
     let _ = writeln!(out, "entity {} is", value.name.0);
+    if !value.generics.is_empty() {
+        out.push_str("  generic (\n");
+        for (i, generic) in value.generics.iter().enumerate() {
+            let kind = match generic.kind {
+                VhdlGenericKind::Natural => "natural",
+                VhdlGenericKind::Positive => "positive",
+            };
+            let suffix = if i + 1 == value.generics.len() {
+                ""
+            } else {
+                ";"
+            };
+            let _ = writeln!(
+                out,
+                "    {} : {} := {}{}",
+                generic.name.0, kind, generic.default, suffix
+            );
+        }
+        out.push_str("  );\n");
+    }
     if !value.ports.is_empty() {
         out.push_str("  port (\n");
         for (i, port) in value.ports.iter().enumerate() {
@@ -87,13 +107,29 @@ fn concurrent(out: &mut String, statement: &VhdlConcurrentStatement) {
         VhdlConcurrentStatement::EntityInstance {
             label,
             entity,
+            generics,
             ports,
         } => {
-            if ports.is_empty() {
+            if ports.is_empty() && generics.is_empty() {
                 let _ = writeln!(out, "  {} : entity work.{};", label.0, entity.0);
                 return;
             }
             let _ = writeln!(out, "  {} : entity work.{}", label.0, entity.0);
+            if !generics.is_empty() {
+                out.push_str("    generic map (\n");
+                for (index, (formal, actual)) in generics.iter().enumerate() {
+                    let suffix = if index + 1 == generics.len() { "" } else { "," };
+                    let _ = writeln!(out, "      {} => {}{}", formal.0, expr(actual), suffix);
+                }
+                out.push_str(if ports.is_empty() {
+                    "    );\n"
+                } else {
+                    "    )\n"
+                });
+            }
+            if ports.is_empty() {
+                return;
+            }
             out.push_str("    port map (\n");
             for (index, (formal, actual)) in ports.iter().enumerate() {
                 let suffix = if index + 1 == ports.len() { "" } else { "," };
@@ -205,9 +241,17 @@ fn escape_string(value: &str) -> String {
 fn type_text(value: &VhdlType) -> String {
     match value {
         VhdlType::StdLogic => "std_logic".into(),
-        VhdlType::Unsigned(w) => format!("unsigned({} downto 0)", w.saturating_sub(1)),
-        VhdlType::Signed(w) => format!("signed({} downto 0)", w.saturating_sub(1)),
+        VhdlType::Unsigned(w) => format!("unsigned({} downto 0)", width_high(w)),
+        VhdlType::Signed(w) => format!("signed({} downto 0)", width_high(w)),
     }
+}
+fn width_high(value: &VhdlExpression) -> String {
+    if let VhdlExpression::Literal(v) = value
+        && let Ok(width) = v.parse::<u64>()
+    {
+        return width.saturating_sub(1).to_string();
+    }
+    format!("{} - 1", expr(value))
 }
 fn expr(value: &VhdlExpression) -> String {
     match value {

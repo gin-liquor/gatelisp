@@ -1,0 +1,26 @@
+(module generic-register
+  (generics
+    (width :positive 8))
+  (ports
+    (clk :in bit)
+    (input :in (unsigned width))
+    (value :out (unsigned width)))
+  (reg stored (unsigned width) 0)
+  (clocked clk
+    (next stored input))
+  (assign value stored))
+
+(module generic-top
+  (generics
+    (data-width :positive 16))
+  (ports
+    (clk :in bit)
+    (input :in (unsigned data-width))
+    (value :out (unsigned data-width)))
+  (instance register0 generic-register
+    (generics
+      (width data-width))
+    (ports
+      (clk clk)
+      (input input)
+      (value value))))

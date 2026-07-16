@@ -15,7 +15,20 @@ pub struct VhdlIdentifier(pub String);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VhdlEntity {
     pub name: VhdlIdentifier,
+    pub generics: Vec<VhdlGeneric>,
     pub ports: Vec<VhdlPort>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VhdlGeneric {
+    pub name: VhdlIdentifier,
+    pub kind: VhdlGenericKind,
+    pub default: u64,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VhdlGenericKind {
+    Natural,
+    Positive,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,8 +47,8 @@ pub enum VhdlPortMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VhdlType {
     StdLogic,
-    Unsigned(u32),
-    Signed(u32),
+    Unsigned(VhdlExpression),
+    Signed(VhdlExpression),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +84,7 @@ pub enum VhdlConcurrentStatement {
     EntityInstance {
         label: VhdlIdentifier,
         entity: VhdlIdentifier,
+        generics: Vec<(VhdlIdentifier, VhdlExpression)>,
         ports: Vec<(VhdlIdentifier, VhdlIdentifier)>,
     },
 }

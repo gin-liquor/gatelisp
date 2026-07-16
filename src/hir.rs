@@ -15,11 +15,30 @@ pub struct TestbenchId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InstanceId(pub u32);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GenericId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GenericKind {
+    Natural,
+    Positive,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum WidthExpr {
+    Constant(u64),
+    Generic(GenericId),
+    Add(Box<WidthExpr>, Box<WidthExpr>),
+    Multiply(Box<WidthExpr>, Box<WidthExpr>),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum HardwareType {
     Bit,
     Unsigned(u32),
     Signed(u32),
+    SymbolicUnsigned(WidthExpr),
+    SymbolicSigned(WidthExpr),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,6 +53,7 @@ pub struct TypedTestbench {
     pub id: TestbenchId,
     pub name: String,
     pub target: ModuleId,
+    pub target_generic_bindings: Vec<TypedGenericBinding>,
     pub clocks: Vec<TypedTestbenchClock>,
     pub statements: Vec<TypedTestbenchStmt>,
     pub span: Span,
@@ -80,6 +100,7 @@ pub struct TypedModule {
     pub id: ModuleId,
     pub name: String,
     pub name_span: Span,
+    pub generics: Vec<TypedGeneric>,
     pub signals: Vec<TypedSignal>,
     pub assignments: Vec<TypedAssign>,
     pub clocked_blocks: Vec<TypedClockedBlock>,
@@ -92,7 +113,25 @@ pub struct TypedInstance {
     pub id: InstanceId,
     pub name: String,
     pub target_module: ModuleId,
+    pub generic_bindings: Vec<TypedGenericBinding>,
     pub connections: Vec<TypedPortConnection>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedGeneric {
+    pub id: GenericId,
+    pub name: String,
+    pub kind: GenericKind,
+    pub default: u64,
+    pub declaration_span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedGenericBinding {
+    pub formal: GenericId,
+    pub value: WidthExpr,
+    pub uses_default: bool,
     pub span: Span,
 }
 

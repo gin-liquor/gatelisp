@@ -1,10 +1,10 @@
 use crate::{
-    BinaryOp, ClockEdge, HardwareType, ModuleId, PortDirection, ResetKind, SignalId, SignalKind,
-    TimeUnit, TypedClockedBlock, TypedExpr, TypedExprKind, TypedModule, TypedNext, TypedProgram,
-    TypedTestbench, TypedTestbenchStmt, UnaryOp, VhdlArchitecture, VhdlConcurrentStatement,
-    VhdlDeclaration, VhdlDesign, VhdlDesignUnit, VhdlEntity, VhdlExpression, VhdlIdentifier,
-    VhdlPort, VhdlPortMode, VhdlProcess, VhdlSensitivity, VhdlSequentialStatement, VhdlType,
-    VhdlVariable,
+    BinaryOp, ClockEdge, GenericKind, HardwareType, ModuleId, PortDirection, ResetKind, SignalId,
+    SignalKind, TimeUnit, TypedClockedBlock, TypedExpr, TypedExprKind, TypedModule, TypedNext,
+    TypedProgram, TypedTestbench, TypedTestbenchStmt, UnaryOp, VhdlArchitecture,
+    VhdlConcurrentStatement, VhdlDeclaration, VhdlDesign, VhdlDesignUnit, VhdlEntity,
+    VhdlExpression, VhdlGeneric, VhdlGenericKind, VhdlIdentifier, VhdlPort, VhdlPortMode,
+    VhdlProcess, VhdlSensitivity, VhdlSequentialStatement, VhdlType, VhdlVariable, WidthExpr,
 };
 use std::{collections::HashMap, fmt};
 
@@ -239,7 +239,7 @@ fn lower_module(
                     ));
                 }
             };
-            if connection.direction != formal_direction || connection.ty != formal.ty {
+            if connection.direction != formal_direction {
                 return Err(VhdlBackendError::new(
                     VhdlBackendErrorKind::InvalidTypedExpression,
                     "instance connection disagrees with its formal port",
@@ -277,6 +277,12 @@ fn lower_module(
                 sanitize(&instance.name)
             )),
             entity: module_name(target.id, &target.name),
+            generics: instance
+                .generic_bindings
+                .iter()
+                .filter(|b| !b.uses_default)
+                .map(|b| Ok((generic_name(b.formal), lower_width(&b.value)?)))
+                .collect::<Result<Vec<_>, VhdlBackendError>>()?,
             ports,
         });
     }
@@ -298,6 +304,19 @@ fn lower_module(
     Ok((
         VhdlEntity {
             name: entity_name.clone(),
+            generics: module
+                .generics
+                .iter()
+                .map(|g| VhdlGeneric {
+                    name: generic_name(g.id),
+                    kind: if g.kind == GenericKind::Natural {
+                        VhdlGenericKind::Natural
+                    } else {
+                        VhdlGenericKind::Positive
+                    },
+                    default: g.default,
+                })
+                .collect(),
             ports,
         },
         VhdlArchitecture {
@@ -412,7 +431,8 @@ fn lower_testbench(
         if !is_input && !matches!(signal.kind, SignalKind::Output) {
             continue;
         }
-        let ty = lower_type(&signal.ty)?;
+        let concrete_ty = instantiate_type(&signal.ty, &testbench.target_generic_bindings)?;
+        let ty = lower_type(&concrete_ty)?;
         let tb_name = VhdlIdentifier(format!("gl_tb_s{}_{}", signal.id.0, sanitize(&signal.name)));
         let initial = if is_input {
             Some(zero_value(&ty))
@@ -438,6 +458,12 @@ fn lower_testbench(
     let mut statements = vec![VhdlConcurrentStatement::EntityInstance {
         label: VhdlIdentifier("gl_dut".into()),
         entity: module_name(module.id, &module.name),
+        generics: testbench
+            .target_generic_bindings
+            .iter()
+            .filter(|b| !b.uses_default)
+            .map(|b| Ok((generic_name(b.formal), lower_width(&b.value)?)))
+            .collect::<Result<Vec<_>, VhdlBackendError>>()?,
         ports: port_map,
     }];
     for (index, clock) in testbench.clocks.iter().enumerate() {
@@ -534,6 +560,7 @@ fn lower_testbench(
     Ok((
         VhdlEntity {
             name: entity_name.clone(),
+            generics: vec![],
             ports: vec![],
         },
         VhdlArchitecture {
@@ -653,14 +680,23 @@ fn lower_expr(
 }
 
 fn lower_type(ty: &HardwareType) -> Result<VhdlType, VhdlBackendError> {
-    match *ty {
+    match ty {
         HardwareType::Bit => Ok(VhdlType::StdLogic),
-        HardwareType::Unsigned(0) | HardwareType::Signed(0) => Err(VhdlBackendError::new(
+        HardwareType::Unsigned(0)
+        | HardwareType::Signed(0)
+        | HardwareType::SymbolicUnsigned(WidthExpr::Constant(0))
+        | HardwareType::SymbolicSigned(WidthExpr::Constant(0)) => Err(VhdlBackendError::new(
             VhdlBackendErrorKind::InvalidTypeWidth,
             "VHDL vector width must be positive",
         )),
-        HardwareType::Unsigned(width) => Ok(VhdlType::Unsigned(width)),
-        HardwareType::Signed(width) => Ok(VhdlType::Signed(width)),
+        HardwareType::Unsigned(width) => Ok(VhdlType::Unsigned(VhdlExpression::Literal(
+            width.to_string(),
+        ))),
+        HardwareType::Signed(width) => {
+            Ok(VhdlType::Signed(VhdlExpression::Literal(width.to_string())))
+        }
+        HardwareType::SymbolicUnsigned(width) => Ok(VhdlType::Unsigned(lower_width(width)?)),
+        HardwareType::SymbolicSigned(width) => Ok(VhdlType::Signed(lower_width(width)?)),
     }
 }
 fn integer_literal(value: i64, ty: &HardwareType) -> Result<VhdlExpression, VhdlBackendError> {
@@ -673,20 +709,95 @@ fn integer_literal(value: i64, ty: &HardwareType) -> Result<VhdlExpression, Vhdl
                 "invalid bit literal",
             ));
         }
-        HardwareType::Unsigned(width) if *width > 0 => {
-            format!("resize(unsigned'(x\"{:016x}\"), {width})", value as u64)
+        HardwareType::Unsigned(width) => {
+            return Ok(VhdlExpression::Call {
+                function: VhdlIdentifier("resize".into()),
+                arguments: vec![
+                    VhdlExpression::Literal(format!("unsigned'(x\"{:016x}\")", value as u64)),
+                    VhdlExpression::Literal(width.to_string()),
+                ],
+            });
         }
-        HardwareType::Signed(width) if *width > 0 => {
-            format!("resize(signed'(x\"{:016x}\"), {width})", value as u64)
+        HardwareType::Signed(width) => {
+            return Ok(VhdlExpression::Call {
+                function: VhdlIdentifier("resize".into()),
+                arguments: vec![
+                    VhdlExpression::Literal(format!("signed'(x\"{:016x}\")", value as u64)),
+                    VhdlExpression::Literal(width.to_string()),
+                ],
+            });
         }
-        _ => {
-            return Err(VhdlBackendError::new(
-                VhdlBackendErrorKind::InvalidTypeWidth,
-                "integer has invalid target width",
-            ));
+        HardwareType::SymbolicUnsigned(width) => {
+            return Ok(VhdlExpression::Call {
+                function: VhdlIdentifier("resize".into()),
+                arguments: vec![
+                    VhdlExpression::Literal(format!("unsigned'(x\"{:016x}\")", value as u64)),
+                    lower_width(width)?,
+                ],
+            });
+        }
+        HardwareType::SymbolicSigned(width) => {
+            return Ok(VhdlExpression::Call {
+                function: VhdlIdentifier("resize".into()),
+                arguments: vec![
+                    VhdlExpression::Literal(format!("signed'(x\"{:016x}\")", value as u64)),
+                    lower_width(width)?,
+                ],
+            });
         }
     };
     Ok(VhdlExpression::Literal(text))
+}
+fn generic_name(id: crate::GenericId) -> VhdlIdentifier {
+    VhdlIdentifier(format!("gl_g{}", id.0))
+}
+fn lower_width(width: &WidthExpr) -> Result<VhdlExpression, VhdlBackendError> {
+    match width {
+        WidthExpr::Constant(v) => Ok(VhdlExpression::Literal(v.to_string())),
+        WidthExpr::Generic(id) => Ok(VhdlExpression::Name(generic_name(*id))),
+        WidthExpr::Add(a, b) => Ok(VhdlExpression::Binary {
+            op: "+".into(),
+            left: Box::new(lower_width(a)?),
+            right: Box::new(lower_width(b)?),
+        }),
+        WidthExpr::Multiply(a, b) => Ok(VhdlExpression::Binary {
+            op: "*".into(),
+            left: Box::new(lower_width(a)?),
+            right: Box::new(lower_width(b)?),
+        }),
+    }
+}
+fn instantiate_type(
+    ty: &HardwareType,
+    bindings: &[crate::TypedGenericBinding],
+) -> Result<HardwareType, VhdlBackendError> {
+    fn sub(w: &WidthExpr, b: &[crate::TypedGenericBinding]) -> Result<WidthExpr, VhdlBackendError> {
+        match w {
+            WidthExpr::Constant(v) => Ok(WidthExpr::Constant(*v)),
+            WidthExpr::Generic(id) => b
+                .iter()
+                .find(|x| x.formal == *id)
+                .map(|x| x.value.clone())
+                .ok_or_else(|| {
+                    VhdlBackendError::new(
+                        VhdlBackendErrorKind::InconsistentId,
+                        "missing generic binding",
+                    )
+                }),
+            WidthExpr::Add(a, c) => Ok(WidthExpr::Add(Box::new(sub(a, b)?), Box::new(sub(c, b)?))),
+            WidthExpr::Multiply(a, c) => Ok(WidthExpr::Multiply(
+                Box::new(sub(a, b)?),
+                Box::new(sub(c, b)?),
+            )),
+        }
+    }
+    match ty {
+        HardwareType::Bit => Ok(HardwareType::Bit),
+        HardwareType::Unsigned(v) => Ok(HardwareType::Unsigned(*v)),
+        HardwareType::Signed(v) => Ok(HardwareType::Signed(*v)),
+        HardwareType::SymbolicUnsigned(w) => Ok(HardwareType::SymbolicUnsigned(sub(w, bindings)?)),
+        HardwareType::SymbolicSigned(w) => Ok(HardwareType::SymbolicSigned(sub(w, bindings)?)),
+    }
 }
 fn binary_text(op: BinaryOp) -> &'static str {
     match op {
