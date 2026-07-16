@@ -142,6 +142,15 @@ fn generated_vhdl_matches_golden_files() {
             "generic_shift_test",
             include_str!("golden/generic_shift_test.expected.vhd"),
         ),
+        ("bit_at", include_str!("golden/bit_at.expected.vhd")),
+        (
+            "generic_bit_at",
+            include_str!("golden/generic_bit_at.expected.vhd"),
+        ),
+        (
+            "clock_edges",
+            include_str!("golden/clock_edges.expected.vhd"),
+        ),
     ] {
         assert_eq!(
             compile_example(name).replace("\r\n", "\n"),

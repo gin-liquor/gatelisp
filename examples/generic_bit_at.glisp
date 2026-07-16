@@ -1,0 +1,4 @@
+(module generic-bit-at
+  (generics (width :positive 8))
+  (ports (data :in (unsigned width)) (high :out bit))
+  (assign high (bit-at data (- width 1))))

@@ -111,6 +111,7 @@ pub enum ConstExprAst {
     Reference(Identifier),
     Add(Box<Spanned<ConstExprAst>>, Box<Spanned<ConstExprAst>>),
     Multiply(Box<Spanned<ConstExprAst>>, Box<Spanned<ConstExprAst>>),
+    Subtract(Box<Spanned<ConstExprAst>>, Box<Spanned<ConstExprAst>>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -166,8 +167,15 @@ pub struct AssignStmt {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClockedDecl {
     pub clock: Identifier,
+    pub edge: ClockEdgeSyntax,
     pub reset: Option<Spanned<ResetDecl>>,
     pub updates: Vec<Spanned<NextStmt>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClockEdgeSyntax {
+    Rising,
+    Falling,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -217,6 +225,10 @@ pub enum Expr {
         kind: StaticBitMotionSyntaxKind,
         value: Box<Spanned<Expr>>,
         amount: Spanned<ConstExprAst>,
+    },
+    BitAt {
+        source: Box<Spanned<Expr>>,
+        index: Spanned<ConstExprAst>,
     },
 }
 

@@ -1,9 +1,9 @@
 use std::fmt;
 
 use crate::{
-    AssignStmt, ClockedDecl, ConstExprAst, Expr, GenericBinding, GenericDecl, GenericKindSyntax,
-    Identifier, InstanceDecl, ModuleDecl, ModuleItem, NextStmt, PortConnection, PortDecl,
-    PortDirection, Program, RegisterDecl, ResetDecl, ResetKind, SExpr, Span, Spanned,
+    AssignStmt, ClockEdgeSyntax, ClockedDecl, ConstExprAst, Expr, GenericBinding, GenericDecl,
+    GenericKindSyntax, Identifier, InstanceDecl, ModuleDecl, ModuleItem, NextStmt, PortConnection,
+    PortDecl, PortDirection, Program, RegisterDecl, ResetDecl, ResetKind, SExpr, Span, Spanned,
     StaticBitMotionSyntaxKind, TestbenchClockDecl, TestbenchDecl, TestbenchStmt, TimeLiteral,
     TimeUnit, TypeExpr, WireDecl,
 };
@@ -421,6 +421,22 @@ fn parse_const_expr(expression: &Spanned<SExpr>) -> Result<Spanned<ConstExprAst>
     })
 }
 
+fn parse_bit_index(expression: &Spanned<SExpr>) -> Result<Spanned<ConstExprAst>, GateParseError> {
+    if let SExpr::List(values) = &expression.value
+        && values.len() == 3
+        && is_symbol(values.first(), "-")
+    {
+        return Ok(Spanned {
+            value: ConstExprAst::Subtract(
+                Box::new(parse_bit_index(&values[1])?),
+                Box::new(parse_bit_index(&values[2])?),
+            ),
+            span: expression.span,
+        });
+    }
+    parse_const_expr(expression)
+}
+
 fn parse_generic_bindings(
     expression: &Spanned<SExpr>,
 ) -> Result<Vec<Spanned<GenericBinding>>, GateParseError> {
@@ -596,11 +612,44 @@ fn parse_clocked(expression: &Spanned<SExpr>) -> Result<ClockedDecl, GateParseEr
             ));
         }
     };
-    let clock = identifier(
-        &list[1],
-        GateParseErrorKind::InvalidClockName,
-        "clock name must be a symbol",
-    )?;
+    let (clock, edge) = match &list[1].value {
+        SExpr::List(edge) => {
+            if edge.len() != 2 {
+                return Err(error(
+                    GateParseErrorKind::InvalidClockName,
+                    "clock edge requires exactly one clock signal",
+                    &list[1],
+                ));
+            }
+            let kind = match &edge[0].value {
+                SExpr::Symbol(name) if name == "rising" => ClockEdgeSyntax::Rising,
+                SExpr::Symbol(name) if name == "falling" => ClockEdgeSyntax::Falling,
+                _ => {
+                    return Err(error(
+                        GateParseErrorKind::InvalidClockName,
+                        "clock edge must be rising or falling",
+                        &edge[0],
+                    ));
+                }
+            };
+            (
+                identifier(
+                    &edge[1],
+                    GateParseErrorKind::InvalidClockName,
+                    "clock must be a signal symbol",
+                )?,
+                kind,
+            )
+        }
+        _ => (
+            identifier(
+                &list[1],
+                GateParseErrorKind::InvalidClockName,
+                "clock name must be a symbol",
+            )?,
+            ClockEdgeSyntax::Rising,
+        ),
+    };
     if list.len() == 2 {
         return Err(error(
             GateParseErrorKind::EmptyClocked,
@@ -664,6 +713,7 @@ fn parse_clocked(expression: &Spanned<SExpr>) -> Result<ClockedDecl, GateParseEr
     }
     Ok(ClockedDecl {
         clock,
+        edge,
         reset,
         updates,
     })
@@ -896,6 +946,22 @@ fn parse_expr(expression: &Spanned<SExpr>) -> Result<Spanned<Expr>, GateParseErr
                 return Ok(Spanned {
                     value: Expr::Concat {
                         values: list[1..].iter().map(parse_expr).collect::<Result<_, _>>()?,
+                    },
+                    span: expression.span,
+                });
+            }
+            if callee.name == "bit-at" {
+                if list.len() != 3 {
+                    return Err(error(
+                        GateParseErrorKind::InvalidExpression,
+                        "bit-at requires source and index",
+                        expression,
+                    ));
+                }
+                return Ok(Spanned {
+                    value: Expr::BitAt {
+                        source: Box::new(parse_expr(&list[1])?),
+                        index: parse_bit_index(&list[2])?,
                     },
                     span: expression.span,
                 });

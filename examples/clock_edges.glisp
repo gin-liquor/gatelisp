@@ -1,0 +1,13 @@
+(module clock-edges
+  (ports (clk :in bit) (reset :in bit) (input :in bit)
+    (rising-value :out bit) (falling-value :out bit))
+  (reg rising-reg bit 0)
+  (reg falling-reg bit 0)
+  (clocked (rising clk)
+    (reset :sync reset (next rising-reg 0))
+    (next rising-reg input))
+  (clocked (falling clk)
+    (reset :async reset (next falling-reg 0))
+    (next falling-reg input))
+  (assign rising-value rising-reg)
+  (assign falling-value falling-reg))

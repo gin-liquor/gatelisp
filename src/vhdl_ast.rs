@@ -71,6 +71,7 @@ pub enum VhdlDeclaration {
     TruncateSignedFunction,
     BitToVectorFunction,
     ReverseBitsFunction,
+    BitAtFunction,
     Constant {
         name: VhdlIdentifier,
         ty: String,

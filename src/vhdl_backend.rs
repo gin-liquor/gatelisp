@@ -193,6 +193,9 @@ fn lower_module(
     if module_needs_reverse_bits(module) {
         declarations.push(VhdlDeclaration::ReverseBitsFunction);
     }
+    if module_needs_bit_at(module) {
+        declarations.push(VhdlDeclaration::BitAtFunction);
+    }
     let mut statements = Vec::new();
     for (index, assignment) in module.assignments.iter().enumerate() {
         let target = signal_name(&names, assignment.target)?.read.clone();
@@ -213,6 +216,22 @@ fn lower_module(
         }));
     }
     for block in &module.clocked_blocks {
+        let clock = module
+            .signals
+            .iter()
+            .find(|signal| signal.id == block.clock)
+            .ok_or_else(|| {
+                VhdlBackendError::new(
+                    VhdlBackendErrorKind::InconsistentId,
+                    "clocked block references an unknown clock SignalId",
+                )
+            })?;
+        if clock.ty != HardwareType::Bit {
+            return Err(VhdlBackendError::new(
+                VhdlBackendErrorKind::InvalidTypedExpression,
+                "clocked block clock must have type bit",
+            ));
+        }
         statements.push(VhdlConcurrentStatement::Process(lower_clocked(
             block,
             &names,
@@ -355,12 +374,6 @@ fn lower_clocked(
     names: &HashMap<SignalId, SignalNames>,
     generics: &[crate::GenericId],
 ) -> Result<VhdlProcess, VhdlBackendError> {
-    if block.edge != ClockEdge::Rising {
-        return Err(VhdlBackendError::new(
-            VhdlBackendErrorKind::InvalidTypedExpression,
-            "unsupported clock edge",
-        ));
-    }
     let clock = signal_name(names, block.clock)?.read.clone();
     let mut context = LowerContext {
         names: names.clone(),
@@ -369,8 +382,11 @@ fn lower_clocked(
         variables: Vec::new(),
     };
     let normal = lower_updates(&block.updates, &mut context)?;
-    let rising = VhdlExpression::Call {
-        function: VhdlIdentifier("rising_edge".into()),
+    let edge = VhdlExpression::Call {
+        function: VhdlIdentifier(match block.edge {
+            ClockEdge::Rising => "rising_edge".into(),
+            ClockEdge::Falling => "falling_edge".into(),
+        }),
         arguments: vec![VhdlExpression::Name(clock.clone())],
     };
     let (sensitivity, statements) = if let Some(reset) = &block.reset {
@@ -385,7 +401,7 @@ fn lower_clocked(
             ResetKind::Synchronous => (
                 VhdlSensitivity::Signals(vec![clock]),
                 vec![VhdlSequentialStatement::If {
-                    condition: rising,
+                    condition: edge,
                     then_statements: vec![VhdlSequentialStatement::If {
                         condition: reset_condition,
                         then_statements: reset_updates,
@@ -400,7 +416,7 @@ fn lower_clocked(
                     condition: reset_condition,
                     then_statements: reset_updates,
                     else_statements: vec![VhdlSequentialStatement::If {
-                        condition: rising,
+                        condition: edge,
                         then_statements: normal,
                         else_statements: vec![],
                     }],
@@ -411,7 +427,7 @@ fn lower_clocked(
         (
             VhdlSensitivity::Signals(vec![clock]),
             vec![VhdlSequentialStatement::If {
-                condition: rising,
+                condition: edge,
                 then_statements: normal,
                 else_statements: vec![],
             }],
@@ -460,6 +476,9 @@ fn lower_testbench(
     }
     if testbench_needs_reverse_bits(testbench) {
         declarations.push(VhdlDeclaration::ReverseBitsFunction);
+    }
+    if testbench_needs_bit_at(testbench) {
+        declarations.push(VhdlDeclaration::BitAtFunction);
     }
     let mut names = HashMap::new();
     let mut port_map = Vec::new();
@@ -987,6 +1006,47 @@ fn lower_expr(
                 arguments: vec![lower_expr(value, context, prelude)?, lower_width(amount)?],
             })
         }
+        TypedExprKind::BitAt { source, index } => {
+            if expr.ty != HardwareType::Bit {
+                return Err(VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "bit-at result must have type bit",
+                ));
+            }
+            let source_width = hardware_width(&source.ty).ok_or_else(|| {
+                VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "bit-at source must be a vector",
+                )
+            })?;
+            if !width_generics_are_known(index, &context.generics) {
+                return Err(VhdlBackendError::new(
+                    VhdlBackendErrorKind::InconsistentId,
+                    "bit-at index contains an unknown GenericId",
+                ));
+            }
+            let end = add_width_backend(index.clone(), WidthExpr::Constant(1))?;
+            if !prove_ge_backend(&source_width, &end) {
+                return Err(VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "bit-at index is not proven less than source width",
+                ));
+            }
+            let mut value = lower_expr(source, context, prelude)?;
+            if matches!(
+                source.ty,
+                HardwareType::Signed(_) | HardwareType::SymbolicSigned(_)
+            ) {
+                value = VhdlExpression::Call {
+                    function: VhdlIdentifier("unsigned".into()),
+                    arguments: vec![value],
+                };
+            }
+            Ok(VhdlExpression::Call {
+                function: VhdlIdentifier("gl_bit_at".into()),
+                arguments: vec![value, lower_width(index)?],
+            })
+        }
     }
 }
 
@@ -994,7 +1054,9 @@ fn width_generics_are_known(width: &WidthExpr, known: &[crate::GenericId]) -> bo
     match width {
         WidthExpr::Constant(_) => true,
         WidthExpr::Generic(id) => known.contains(id),
-        WidthExpr::Add(left, right) | WidthExpr::Multiply(left, right) => {
+        WidthExpr::Add(left, right)
+        | WidthExpr::Multiply(left, right)
+        | WidthExpr::Subtract(left, right) => {
             width_generics_are_known(left, known) && width_generics_are_known(right, known)
         }
     }
@@ -1060,6 +1122,11 @@ fn operand_width_backend(ty: &HardwareType) -> Option<WidthExpr> {
     }
 }
 fn add_width_backend(left: WidthExpr, right: WidthExpr) -> Result<WidthExpr, VhdlBackendError> {
+    if let WidthExpr::Subtract(value, subtracted) = &left
+        && **subtracted == right
+    {
+        return Ok((**value).clone());
+    }
     match (left, right) {
         (WidthExpr::Constant(0), value) | (value, WidthExpr::Constant(0)) => Ok(value),
         (WidthExpr::Constant(a), WidthExpr::Constant(b)) => {
@@ -1178,6 +1245,7 @@ fn expr_truncate_helpers(expr: &TypedExpr, flags: &mut (bool, bool)) {
         TypedExprKind::ReverseBits { value } | TypedExprKind::StaticBitMotion { value, .. } => {
             expr_truncate_helpers(value, flags)
         }
+        TypedExprKind::BitAt { source, .. } => expr_truncate_helpers(source, flags),
     }
 }
 fn module_truncate_helpers(module: &TypedModule) -> (bool, bool) {
@@ -1234,6 +1302,7 @@ fn expr_has_bit_concat(expr: &TypedExpr) -> bool {
         TypedExprKind::ReverseBits { value } | TypedExprKind::StaticBitMotion { value, .. } => {
             expr_has_bit_concat(value)
         }
+        TypedExprKind::BitAt { source, .. } => expr_has_bit_concat(source),
     }
 }
 fn module_needs_bit_concat(module: &TypedModule) -> bool {
@@ -1275,6 +1344,7 @@ fn expr_has_reverse_bits(expr: &TypedExpr) -> bool {
         }
         TypedExprKind::Concat { values } => values.iter().any(expr_has_reverse_bits),
         TypedExprKind::StaticBitMotion { value, .. } => expr_has_reverse_bits(value),
+        TypedExprKind::BitAt { source, .. } => expr_has_reverse_bits(source),
         TypedExprKind::Signal(_) | TypedExprKind::Integer(_) => false,
     }
 }
@@ -1296,6 +1366,51 @@ fn testbench_needs_reverse_bits(testbench: &TypedTestbench) -> bool {
         TypedTestbenchStmt::Assert { condition, .. } => expr_has_reverse_bits(condition),
         _ => false,
     })
+}
+
+fn expr_has_bit_at(expr: &TypedExpr) -> bool {
+    match &expr.kind {
+        TypedExprKind::BitAt { .. } => true,
+        TypedExprKind::Slice { value, .. }
+        | TypedExprKind::Convert { value, .. }
+        | TypedExprKind::Unary { operand: value, .. }
+        | TypedExprKind::ReverseBits { value }
+        | TypedExprKind::StaticBitMotion { value, .. } => expr_has_bit_at(value),
+        TypedExprKind::Binary { left, right, .. } => {
+            expr_has_bit_at(left) || expr_has_bit_at(right)
+        }
+        TypedExprKind::If {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            expr_has_bit_at(condition) || expr_has_bit_at(when_true) || expr_has_bit_at(when_false)
+        }
+        TypedExprKind::Concat { values } => values.iter().any(expr_has_bit_at),
+        TypedExprKind::Signal(_) | TypedExprKind::Integer(_) => false,
+    }
+}
+
+fn module_needs_bit_at(module: &TypedModule) -> bool {
+    module.assignments.iter().any(|a| expr_has_bit_at(&a.value))
+        || module.clocked_blocks.iter().any(|block| {
+            block.updates.iter().any(|u| expr_has_bit_at(&u.value))
+                || block
+                    .reset
+                    .as_ref()
+                    .is_some_and(|reset| reset.updates.iter().any(|u| expr_has_bit_at(&u.value)))
+        })
+}
+
+fn testbench_needs_bit_at(testbench: &TypedTestbench) -> bool {
+    testbench
+        .statements
+        .iter()
+        .any(|statement| match statement {
+            TypedTestbenchStmt::Drive { value, .. } => expr_has_bit_at(value),
+            TypedTestbenchStmt::Assert { condition, .. } => expr_has_bit_at(condition),
+            _ => false,
+        })
 }
 
 fn lower_type(ty: &HardwareType) -> Result<VhdlType, VhdlBackendError> {
@@ -1384,6 +1499,11 @@ fn lower_width(width: &WidthExpr) -> Result<VhdlExpression, VhdlBackendError> {
             left: Box::new(lower_width(a)?),
             right: Box::new(lower_width(b)?),
         }),
+        WidthExpr::Subtract(a, b) => Ok(VhdlExpression::Binary {
+            op: "-".into(),
+            left: Box::new(lower_width(a)?),
+            right: Box::new(lower_width(b)?),
+        }),
     }
 }
 fn instantiate_type(
@@ -1405,6 +1525,10 @@ fn instantiate_type(
                 }),
             WidthExpr::Add(a, c) => Ok(WidthExpr::Add(Box::new(sub(a, b)?), Box::new(sub(c, b)?))),
             WidthExpr::Multiply(a, c) => Ok(WidthExpr::Multiply(
+                Box::new(sub(a, b)?),
+                Box::new(sub(c, b)?),
+            )),
+            WidthExpr::Subtract(a, c) => Ok(WidthExpr::Subtract(
                 Box::new(sub(a, b)?),
                 Box::new(sub(c, b)?),
             )),

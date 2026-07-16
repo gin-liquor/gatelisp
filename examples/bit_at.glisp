@@ -1,0 +1,7 @@
+(module bit-at-example
+  (ports (data :in (unsigned 8)) (signed-data :in (signed 8))
+    (low :out bit) (high :out bit) (reversed :out bit) (shifted :out bit))
+  (assign low (bit-at data 0))
+  (assign high (bit-at signed-data 7))
+  (assign reversed (bit-at (reverse-bits data) 3))
+  (assign shifted (bit-at (shift-left data 1) 0)))

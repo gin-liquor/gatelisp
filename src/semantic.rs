@@ -4,14 +4,14 @@ use std::{
 };
 
 use crate::{
-    BinaryOp, ClockEdge, ClockedBlockId, ClockedDecl, ConstExprAst, ConversionKind, Expr,
-    GenericBinding, GenericId, GenericKind, GenericKindSyntax, HardwareType, InstanceId,
-    ModuleDecl, ModuleId, ModuleItem, NextStmt, PortDirection, Program, SignalId, SignalKind,
-    SimulationTime, Span, Spanned, StaticBitMotionKind, StaticBitMotionSyntaxKind, TestbenchDecl,
-    TestbenchId, TestbenchStmt, TypeExpr, TypedAssign, TypedClockedBlock, TypedExpr, TypedExprKind,
-    TypedGeneric, TypedGenericBinding, TypedInstance, TypedModule, TypedNext, TypedPortConnection,
-    TypedProgram, TypedReset, TypedSignal, TypedTestbench, TypedTestbenchClock, TypedTestbenchStmt,
-    UnaryOp, WidthExpr,
+    BinaryOp, ClockEdge, ClockEdgeSyntax, ClockedBlockId, ClockedDecl, ConstExprAst,
+    ConversionKind, Expr, GenericBinding, GenericId, GenericKind, GenericKindSyntax, HardwareType,
+    InstanceId, ModuleDecl, ModuleId, ModuleItem, NextStmt, PortDirection, Program, SignalId,
+    SignalKind, SimulationTime, Span, Spanned, StaticBitMotionKind, StaticBitMotionSyntaxKind,
+    TestbenchDecl, TestbenchId, TestbenchStmt, TypeExpr, TypedAssign, TypedClockedBlock, TypedExpr,
+    TypedExprKind, TypedGeneric, TypedGenericBinding, TypedInstance, TypedModule, TypedNext,
+    TypedPortConnection, TypedProgram, TypedReset, TypedSignal, TypedTestbench,
+    TypedTestbenchClock, TypedTestbenchStmt, UnaryOp, WidthExpr,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +92,9 @@ pub enum SemanticErrorKind {
     InvalidStaticBitMotionSignedness,
     StaticBitMotionAmountOutOfRange,
     StaticBitMotionAmountRangeUnknown,
+    InvalidBitAtSource,
+    BitAtIndexOutOfRange,
+    BitAtIndexRangeUnknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -872,7 +875,10 @@ fn analyze_clocked(
     Ok(TypedClockedBlock {
         id,
         clock,
-        edge: ClockEdge::Rising,
+        edge: match clocked.edge {
+            ClockEdgeSyntax::Rising => ClockEdge::Rising,
+            ClockEdgeSyntax::Falling => ClockEdge::Falling,
+        },
         reset,
         updates,
         span,
@@ -1113,6 +1119,7 @@ fn check_expr(
             };
             check_static_bit_motion(kind, value, amount, context, expr.span)?
         }
+        Expr::BitAt { source, index } => check_bit_at(source, index, context, expr.span)?,
     };
     if let Some(expected) = expected
         && &typed.ty != expected
@@ -1183,6 +1190,51 @@ fn check_static_bit_motion(
             amount,
         },
         ty: value.ty,
+        span,
+    })
+}
+
+fn check_bit_at(
+    source: &Spanned<Expr>,
+    index: &Spanned<ConstExprAst>,
+    context: &ModuleContext,
+    span: Span,
+) -> Result<TypedExpr, SemanticError> {
+    let source = check_expr(source, None, context)?;
+    let (_, source_width) = vector_parts(&source.ty).ok_or_else(|| {
+        SemanticError::new(
+            SemanticErrorKind::InvalidBitAtSource,
+            "bit-at source must be an unsigned or signed vector",
+            source.span,
+        )
+    })?;
+    let index_span = index.span;
+    let index = normalize_width(resolve_const(index, &context.generics)?)?;
+    let end = normalize_width(WidthExpr::Add(
+        Box::new(index.clone()),
+        Box::new(WidthExpr::Constant(1)),
+    ))?;
+    if !prove_ge(&source_width, &end, &context.generics)? {
+        let out = matches!(
+            (&source_width, &index),
+            (WidthExpr::Constant(width), WidthExpr::Constant(index)) if index >= width
+        );
+        return Err(SemanticError::new(
+            if out {
+                SemanticErrorKind::BitAtIndexOutOfRange
+            } else {
+                SemanticErrorKind::BitAtIndexRangeUnknown
+            },
+            "cannot prove that bit-at index is less than source width",
+            index_span,
+        ));
+    }
+    Ok(TypedExpr {
+        kind: TypedExprKind::BitAt {
+            source: Box::new(source),
+            index,
+        },
+        ty: HardwareType::Bit,
         span,
     })
 }
@@ -1640,6 +1692,7 @@ fn type_hint(expr: &Spanned<Expr>, context: &ModuleContext) -> Option<HardwareTy
             .and_then(unsigned_width_type),
         Expr::Concat { values } => concat_hint(values, context),
         Expr::StaticBitMotion { value, .. } => type_hint(value, context),
+        Expr::BitAt { .. } => Some(HardwareType::Bit),
         Expr::Call { callee, arguments } => match callee.name.as_str() {
             "=" | "/=" | "<" | "<=" | ">" | ">=" => Some(HardwareType::Bit),
             "not" => arguments.first().and_then(|arg| type_hint(arg, context)),
@@ -1842,6 +1895,10 @@ fn resolve_const(
             Box::new(resolve_const(a, generics)?),
             Box::new(resolve_const(b, generics)?),
         )),
+        ConstExprAst::Subtract(a, b) => Ok(WidthExpr::Subtract(
+            Box::new(resolve_const(a, generics)?),
+            Box::new(resolve_const(b, generics)?),
+        )),
     }
 }
 
@@ -1927,6 +1984,10 @@ fn substitute_type(
                 Box::new(sub(a, bindings)?),
                 Box::new(sub(b, bindings)?),
             )),
+            WidthExpr::Subtract(a, b) => normalize_width(WidthExpr::Subtract(
+                Box::new(sub(a, bindings)?),
+                Box::new(sub(b, bindings)?),
+            )),
         }
     }
     match ty {
@@ -1965,6 +2026,8 @@ fn normalize_width(expr: WidthExpr) -> Result<WidthExpr, SemanticError> {
                 }
                 (WidthExpr::Constant(0), _) => Ok(b),
                 (_, WidthExpr::Constant(0)) => Ok(a),
+                (WidthExpr::Subtract(left, right), _) if **right == b => Ok((**left).clone()),
+                (_, WidthExpr::Subtract(left, right)) if **right == a => Ok((**left).clone()),
                 _ => Ok(WidthExpr::Add(Box::new(a), Box::new(b))),
             }
         }
@@ -1987,6 +2050,24 @@ fn normalize_width(expr: WidthExpr) -> Result<WidthExpr, SemanticError> {
                 (WidthExpr::Constant(1), _) => Ok(b),
                 (_, WidthExpr::Constant(1)) => Ok(a),
                 _ => Ok(WidthExpr::Multiply(Box::new(a), Box::new(b))),
+            }
+        }
+        WidthExpr::Subtract(a, b) => {
+            let a = normalize_width(*a)?;
+            let b = normalize_width(*b)?;
+            match (&a, &b) {
+                _ if a == b => Ok(WidthExpr::Constant(0)),
+                (_, WidthExpr::Constant(0)) => Ok(a),
+                (WidthExpr::Constant(x), WidthExpr::Constant(y)) => {
+                    x.checked_sub(*y).map(WidthExpr::Constant).ok_or_else(|| {
+                        SemanticError::new(
+                            SemanticErrorKind::InvalidWidthExpression,
+                            "constant subtraction would be negative",
+                            empty_span(),
+                        )
+                    })
+                }
+                _ => Ok(WidthExpr::Subtract(Box::new(a), Box::new(b))),
             }
         }
         value => Ok(value),
@@ -2034,6 +2115,23 @@ fn minimum_with_generics(
                     empty_span(),
                 )
             }),
+        WidthExpr::Subtract(a, b) => {
+            let left = minimum_with_generics(a, generics)?;
+            let WidthExpr::Constant(right) = &**b else {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::InvalidWidthExpression,
+                    "cannot prove symbolic subtraction is non-negative",
+                    empty_span(),
+                ));
+            };
+            left.checked_sub(*right).ok_or_else(|| {
+                SemanticError::new(
+                    SemanticErrorKind::InvalidWidthExpression,
+                    "width subtraction can be negative",
+                    empty_span(),
+                )
+            })
+        }
     }
 }
 fn unsigned_bits(v: u128) -> u64 {

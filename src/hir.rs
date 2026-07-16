@@ -30,6 +30,7 @@ pub enum WidthExpr {
     Generic(GenericId),
     Add(Box<WidthExpr>, Box<WidthExpr>),
     Multiply(Box<WidthExpr>, Box<WidthExpr>),
+    Subtract(Box<WidthExpr>, Box<WidthExpr>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -181,6 +182,7 @@ pub struct TypedClockedBlock {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClockEdge {
     Rising,
+    Falling,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -243,6 +245,10 @@ pub enum TypedExprKind {
         kind: StaticBitMotionKind,
         value: Box<TypedExpr>,
         amount: WidthExpr,
+    },
+    BitAt {
+        source: Box<TypedExpr>,
+        index: WidthExpr,
     },
 }
 

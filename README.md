@@ -247,6 +247,21 @@ lowering directly uses the `numeric_std` `shift_left`, `shift_right`,
 `rotate_left`, and `rotate_right` overloads. Runtime shift amounts, bit sources,
 funnel shifts, and carry-producing shifts are not implemented.
 
+## Static bit selection and clock edges
+
+`(bit-at source index)` selects one `bit` from an unsigned or signed vector.
+The index is static and must be proven less than the source width without
+relying on generic defaults. Runtime indices, negative indices, implicit
+modulo, and wraparound are rejected. `(- width 1)` selects the most-significant
+bit of a positive generic width. Generated VHDL uses one on-demand `gl_bit_at`
+helper per architecture and casts signed sources to equal-width unsigned.
+
+The traditional `(clocked clk ...)` form remains rising-edge triggered.
+`(clocked (rising clk) ...)` and `(clocked (falling clk) ...)` lower to
+`rising_edge` and `falling_edge`. Both edges may use the same clock, but paths
+between them can have only half a clock period, so one edge per clock domain is
+normally preferable. Automatic dual-edge or DDR logic is not generated.
+
 ## Bit-order reversal
 
 `(reverse-bits value)` reverses every bit position of an unsigned or signed
