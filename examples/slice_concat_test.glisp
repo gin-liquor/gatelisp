@@ -1,0 +1,18 @@
+(module split-join
+  (generics (width :positive 8))
+  (ports (input :in (unsigned (+ width width))) (low :out (unsigned width)) (high :out (unsigned width)) (joined :out (unsigned (+ width width))))
+  (wire low-internal (unsigned width))
+  (wire high-internal (unsigned width))
+  (assign low-internal (slice input 0 width))
+  (assign high-internal (slice input width width))
+  (assign low low-internal)
+  (assign high high-internal)
+  (assign joined (concat high-internal low-internal)))
+(testbench split-join-test
+  (target split-join (generics (width 8)))
+  (stimulus
+    (drive input 4660)
+    (wait 1 ns)
+    (assert (= low 52) "low byte must be 0x34")
+    (assert (= high 18) "high byte must be 0x12")
+    (assert (= joined 4660) "concat must restore original word")))

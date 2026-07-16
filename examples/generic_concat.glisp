@@ -1,0 +1,4 @@
+(module generic-concat
+  (generics (width :positive 8))
+  (ports (high :in (unsigned width)) (low :in (unsigned width)) (value :out (unsigned (+ width width))))
+  (assign value (concat high low)))

@@ -867,6 +867,38 @@ fn parse_expr(expression: &Spanned<SExpr>) -> Result<Spanned<Expr>, GateParseErr
                     span: expression.span,
                 });
             }
+            if callee.name == "slice" {
+                if list.len() != 4 {
+                    return Err(error(
+                        GateParseErrorKind::InvalidExpression,
+                        "slice requires source, offset, and width",
+                        expression,
+                    ));
+                }
+                return Ok(Spanned {
+                    value: Expr::Slice {
+                        value: Box::new(parse_expr(&list[1])?),
+                        offset: parse_const_expr(&list[2])?,
+                        width: parse_const_expr(&list[3])?,
+                    },
+                    span: expression.span,
+                });
+            }
+            if callee.name == "concat" {
+                if list.len() < 3 {
+                    return Err(error(
+                        GateParseErrorKind::InvalidExpression,
+                        "concat requires at least two operands",
+                        expression,
+                    ));
+                }
+                return Ok(Spanned {
+                    value: Expr::Concat {
+                        values: list[1..].iter().map(parse_expr).collect::<Result<_, _>>()?,
+                    },
+                    span: expression.span,
+                });
+            }
             let arguments = list[1..].iter().map(parse_expr).collect::<Result<_, _>>()?;
             Expr::Call { callee, arguments }
         }

@@ -1,0 +1,5 @@
+(module generic-slice
+  (generics (width :positive 8))
+  (ports (input :in (unsigned (+ width width))) (low :out (unsigned width)) (high :out (unsigned width)))
+  (assign low (slice input 0 width))
+  (assign high (slice input width width)))

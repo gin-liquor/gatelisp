@@ -1,0 +1,4 @@
+(module slice-signed
+  (ports (input :in (signed 16)) (low :out (unsigned 8)) (high :out (signed 8)))
+  (assign low (slice input 0 8))
+  (assign high (as-signed (slice input 8 8))))

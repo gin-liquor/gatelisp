@@ -200,8 +200,33 @@ VHDL lowering uses `numeric_std.resize` for extension, `signed(...)` and
 that explicitly select the low-order bits. In particular, signed truncation is
 not lowered directly to `numeric_std.resize`.
 
-Conversions between `bit` and vectors, slices, concatenation, saturation, and
-rounding are not implemented.
+Conversions between `bit` and vectors, saturation, and rounding are not
+implemented.
+
+## Bit slicing and concatenation
+
+`(slice source offset width)` extracts a statically known range measured from
+the least-significant bit. Offset zero starts at the LSB, and the compiler must
+prove `offset + width <= source width`. Offset and width accept the same
+compile-time literals, generic references, `+`, and `*` expressions as generic
+vector widths. A slice always produces `unsigned`; use `as-signed` when signed
+interpretation is intended.
+
+`(concat upper ... lower)` joins two or more raw bit sequences. Its first
+operand becomes the MSB side and its last operand becomes the LSB side. `bit`,
+`unsigned`, and `signed` operands may be mixed, but standalone integer literals
+have no width and are rejected. The result is always `unsigned`, with a width
+equal to the checked sum of all operand widths. Nested concatenations are
+flattened without changing operand order.
+
+Slice sources and concat operands do not inherit an outer expected type. If a
+symbolic boundary cannot be proved safe for every generic value, compilation
+fails. VHDL lowering emits explicit ranges and `&` concatenation; bit operands
+use an architecture-local one-bit vector helper. The offset/width form was
+chosen to make LSB-oriented hardware fields and generic field sizes explicit.
+
+Runtime indices, high/low slice syntax, individual bit indexing, shifts, and
+rotates are not implemented.
 
 ## Testbenches and simulation
 

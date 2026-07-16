@@ -186,6 +186,9 @@ fn lower_module(
     if need_signed_truncate {
         declarations.push(VhdlDeclaration::TruncateSignedFunction);
     }
+    if module_needs_bit_concat(module) {
+        declarations.push(VhdlDeclaration::BitToVectorFunction);
+    }
     let mut statements = Vec::new();
     for (index, assignment) in module.assignments.iter().enumerate() {
         let target = signal_name(&names, assignment.target)?.read.clone();
@@ -438,6 +441,9 @@ fn lower_testbench(
     }
     if need_signed_truncate {
         declarations.push(VhdlDeclaration::TruncateSignedFunction);
+    }
+    if testbench_needs_bit_concat(testbench) {
+        declarations.push(VhdlDeclaration::BitToVectorFunction);
     }
     let mut names = HashMap::new();
     let mut port_map = Vec::new();
@@ -743,6 +749,141 @@ fn lower_expr(
                 arguments,
             })
         }
+        TypedExprKind::Slice {
+            value,
+            offset,
+            width,
+        } => {
+            let source_width = hardware_width(&value.ty).ok_or_else(|| {
+                VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "slice source is not a vector",
+                )
+            })?;
+            let result_width = hardware_width(&expr.ty).ok_or_else(|| {
+                VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "slice result is not a vector",
+                )
+            })?;
+            if !matches!(
+                expr.ty,
+                HardwareType::Unsigned(_) | HardwareType::SymbolicUnsigned(_)
+            ) || result_width != *width
+            {
+                return Err(VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "slice result type is inconsistent",
+                ));
+            }
+            if let (
+                WidthExpr::Constant(source),
+                WidthExpr::Constant(offset),
+                WidthExpr::Constant(width),
+            ) = (&source_width, offset, width)
+                && offset.checked_add(*width).is_none_or(|end| end > *source)
+            {
+                return Err(VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "slice range is out of bounds",
+                ));
+            }
+            let lowered = lower_expr(value, context, prelude)?;
+            let source = if matches!(value.kind, TypedExprKind::Signal(_)) {
+                lowered
+            } else {
+                let name = VhdlIdentifier(format!("gl_tmp_{}", context.temporary));
+                context.temporary = context.temporary.checked_add(1).ok_or_else(|| {
+                    VhdlBackendError::new(
+                        VhdlBackendErrorKind::InvalidIdentifier,
+                        "too many temporary variables",
+                    )
+                })?;
+                context.variables.push(VhdlVariable {
+                    name: name.clone(),
+                    ty: lower_type(&value.ty)?,
+                });
+                prelude.push(VhdlSequentialStatement::VariableAssignment {
+                    target: name.clone(),
+                    value: lowered,
+                });
+                VhdlExpression::Name(name)
+            };
+            let low = lower_width(offset)?;
+            let high = VhdlExpression::Binary {
+                op: "-".into(),
+                left: Box::new(VhdlExpression::Binary {
+                    op: "+".into(),
+                    left: Box::new(lower_width(offset)?),
+                    right: Box::new(lower_width(width)?),
+                }),
+                right: Box::new(VhdlExpression::Literal("1".into())),
+            };
+            Ok(VhdlExpression::Call {
+                function: VhdlIdentifier("unsigned".into()),
+                arguments: vec![VhdlExpression::Slice {
+                    value: Box::new(source),
+                    high: Box::new(high),
+                    low: Box::new(low),
+                }],
+            })
+        }
+        TypedExprKind::Concat { values } => {
+            if values.len() < 2 {
+                return Err(VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "typed concat requires at least two operands",
+                ));
+            }
+            if values
+                .iter()
+                .any(|value| matches!(value.kind, TypedExprKind::Integer(_)))
+            {
+                return Err(VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "concat integer operand has no width",
+                ));
+            }
+            let mut expected = WidthExpr::Constant(0);
+            for value in values {
+                expected = add_width_backend(
+                    expected,
+                    operand_width_backend(&value.ty).ok_or_else(|| {
+                        VhdlBackendError::new(
+                            VhdlBackendErrorKind::InvalidTypedExpression,
+                            "invalid concat operand",
+                        )
+                    })?,
+                )?;
+            }
+            if !matches!(
+                expr.ty,
+                HardwareType::Unsigned(_) | HardwareType::SymbolicUnsigned(_)
+            ) || hardware_width(&expr.ty) != Some(expected)
+            {
+                return Err(VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "concat result width is inconsistent",
+                ));
+            }
+            let mut parts = Vec::new();
+            for value in values {
+                let lowered = lower_expr(value, context, prelude)?;
+                let function = if value.ty == HardwareType::Bit {
+                    "gl_bit_to_slv"
+                } else {
+                    "std_logic_vector"
+                };
+                parts.push(VhdlExpression::Call {
+                    function: VhdlIdentifier(function.into()),
+                    arguments: vec![lowered],
+                });
+            }
+            Ok(VhdlExpression::Call {
+                function: VhdlIdentifier("unsigned".into()),
+                arguments: vec![VhdlExpression::Concatenate(parts)],
+            })
+        }
     }
 }
 
@@ -753,6 +894,27 @@ fn hardware_width(ty: &HardwareType) -> Option<WidthExpr> {
         }
         HardwareType::SymbolicUnsigned(v) | HardwareType::SymbolicSigned(v) => Some(v.clone()),
         HardwareType::Bit => None,
+    }
+}
+fn operand_width_backend(ty: &HardwareType) -> Option<WidthExpr> {
+    if *ty == HardwareType::Bit {
+        Some(WidthExpr::Constant(1))
+    } else {
+        hardware_width(ty)
+    }
+}
+fn add_width_backend(left: WidthExpr, right: WidthExpr) -> Result<WidthExpr, VhdlBackendError> {
+    match (left, right) {
+        (WidthExpr::Constant(0), value) | (value, WidthExpr::Constant(0)) => Ok(value),
+        (WidthExpr::Constant(a), WidthExpr::Constant(b)) => {
+            a.checked_add(b).map(WidthExpr::Constant).ok_or_else(|| {
+                VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypeWidth,
+                    "concat width overflow",
+                )
+            })
+        }
+        (a, b) => Ok(WidthExpr::Add(Box::new(a), Box::new(b))),
     }
 }
 fn hardware_signedness(ty: &HardwareType) -> Option<bool> {
@@ -851,6 +1013,12 @@ fn expr_truncate_helpers(expr: &TypedExpr, flags: &mut (bool, bool)) {
             expr_truncate_helpers(when_false, flags)
         }
         TypedExprKind::Signal(_) | TypedExprKind::Integer(_) => {}
+        TypedExprKind::Slice { value, .. } => expr_truncate_helpers(value, flags),
+        TypedExprKind::Concat { values } => {
+            for value in values {
+                expr_truncate_helpers(value, flags);
+            }
+        }
     }
 }
 fn module_truncate_helpers(module: &TypedModule) -> (bool, bool) {
@@ -882,6 +1050,48 @@ fn testbench_truncate_helpers(testbench: &TypedTestbench) -> (bool, bool) {
         }
     }
     flags
+}
+fn expr_has_bit_concat(expr: &TypedExpr) -> bool {
+    match &expr.kind {
+        TypedExprKind::Concat { values } => values
+            .iter()
+            .any(|v| v.ty == HardwareType::Bit || expr_has_bit_concat(v)),
+        TypedExprKind::Slice { value, .. }
+        | TypedExprKind::Convert { value, .. }
+        | TypedExprKind::Unary { operand: value, .. } => expr_has_bit_concat(value),
+        TypedExprKind::Binary { left, right, .. } => {
+            expr_has_bit_concat(left) || expr_has_bit_concat(right)
+        }
+        TypedExprKind::If {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            expr_has_bit_concat(condition)
+                || expr_has_bit_concat(when_true)
+                || expr_has_bit_concat(when_false)
+        }
+        TypedExprKind::Signal(_) | TypedExprKind::Integer(_) => false,
+    }
+}
+fn module_needs_bit_concat(module: &TypedModule) -> bool {
+    module
+        .assignments
+        .iter()
+        .any(|a| expr_has_bit_concat(&a.value))
+        || module.clocked_blocks.iter().any(|b| {
+            b.updates.iter().any(|u| expr_has_bit_concat(&u.value))
+                || b.reset
+                    .as_ref()
+                    .is_some_and(|r| r.updates.iter().any(|u| expr_has_bit_concat(&u.value)))
+        })
+}
+fn testbench_needs_bit_concat(testbench: &TypedTestbench) -> bool {
+    testbench.statements.iter().any(|s| match s {
+        TypedTestbenchStmt::Drive { value, .. } => expr_has_bit_concat(value),
+        TypedTestbenchStmt::Assert { condition, .. } => expr_has_bit_concat(condition),
+        _ => false,
+    })
 }
 
 fn lower_type(ty: &HardwareType) -> Result<VhdlType, VhdlBackendError> {

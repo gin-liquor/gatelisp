@@ -69,6 +69,7 @@ pub enum VhdlDeclaration {
     BoolToStdLogicFunction,
     TruncateUnsignedFunction,
     TruncateSignedFunction,
+    BitToVectorFunction,
     Constant {
         name: VhdlIdentifier,
         ty: String,
@@ -162,4 +163,10 @@ pub enum VhdlExpression {
         function: VhdlIdentifier,
         arguments: Vec<VhdlExpression>,
     },
+    Slice {
+        value: Box<VhdlExpression>,
+        high: Box<VhdlExpression>,
+        low: Box<VhdlExpression>,
+    },
+    Concatenate(Vec<VhdlExpression>),
 }

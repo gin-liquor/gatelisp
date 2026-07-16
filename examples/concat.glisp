@@ -1,0 +1,3 @@
+(module concat-example
+  (ports (high :in (unsigned 8)) (low :in (unsigned 8)) (value :out (unsigned 16)))
+  (assign value (concat high low)))

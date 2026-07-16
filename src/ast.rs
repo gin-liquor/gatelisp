@@ -205,4 +205,12 @@ pub enum Expr {
         target: Spanned<TypeExpr>,
         value: Box<Spanned<Expr>>,
     },
+    Slice {
+        value: Box<Spanned<Expr>>,
+        offset: Spanned<ConstExprAst>,
+        width: Spanned<ConstExprAst>,
+    },
+    Concat {
+        values: Vec<Spanned<Expr>>,
+    },
 }

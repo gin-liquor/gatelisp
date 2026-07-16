@@ -228,6 +228,14 @@ pub enum TypedExprKind {
         value: Box<TypedExpr>,
         target_type: HardwareType,
     },
+    Slice {
+        value: Box<TypedExpr>,
+        offset: WidthExpr,
+        width: WidthExpr,
+    },
+    Concat {
+        values: Vec<TypedExpr>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

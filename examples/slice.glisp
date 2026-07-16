@@ -1,0 +1,4 @@
+(module slice-example
+  (ports (input :in (unsigned 16)) (low :out (unsigned 8)) (high :out (unsigned 8)))
+  (assign low (slice input 0 8))
+  (assign high (slice input 8 8)))

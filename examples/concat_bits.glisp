@@ -1,0 +1,3 @@
+(module concat-bits
+  (ports (valid :in bit) (payload :in (unsigned 7)) (value :out (unsigned 8)))
+  (assign value (concat valid payload)))

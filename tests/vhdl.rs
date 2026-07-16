@@ -70,6 +70,28 @@ fn generated_vhdl_matches_golden_files() {
             "conversion_test",
             include_str!("golden/conversion_test.expected.vhd"),
         ),
+        ("slice", include_str!("golden/slice.expected.vhd")),
+        (
+            "slice_signed",
+            include_str!("golden/slice_signed.expected.vhd"),
+        ),
+        ("concat", include_str!("golden/concat.expected.vhd")),
+        (
+            "concat_bits",
+            include_str!("golden/concat_bits.expected.vhd"),
+        ),
+        (
+            "generic_slice",
+            include_str!("golden/generic_slice.expected.vhd"),
+        ),
+        (
+            "generic_concat",
+            include_str!("golden/generic_concat.expected.vhd"),
+        ),
+        (
+            "slice_concat_test",
+            include_str!("golden/slice_concat_test.expected.vhd"),
+        ),
     ] {
         assert_eq!(
             compile_example(name).replace("\r\n", "\n"),

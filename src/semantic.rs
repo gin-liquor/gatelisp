@@ -81,6 +81,11 @@ pub enum SemanticErrorKind {
     InvalidTruncateDirection,
     WidthRelationUnknown,
     InvalidReinterpretation,
+    SliceSourceNotVector,
+    SliceOutOfBounds,
+    SliceRangeUnknown,
+    InvalidConcatOperand,
+    ConcatWidthOverflow,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1078,6 +1083,12 @@ fn check_expr(
         Expr::Truncate { target, value } => {
             check_sized_conversion(ConversionKind::Truncate, target, value, context, expr.span)?
         }
+        Expr::Slice {
+            value,
+            offset,
+            width,
+        } => check_slice(value, offset, width, context, expr.span)?,
+        Expr::Concat { values } => check_concat(values, context, expr.span)?,
     };
     if let Some(expected) = expected
         && &typed.ty != expected
@@ -1296,6 +1307,132 @@ fn check_sized_conversion(
     })
 }
 
+fn check_slice(
+    value: &Spanned<Expr>,
+    offset: &Spanned<ConstExprAst>,
+    width: &Spanned<ConstExprAst>,
+    context: &ModuleContext,
+    span: Span,
+) -> Result<TypedExpr, SemanticError> {
+    let value = check_expr(value, None, context)?;
+    let (_, source_width) = vector_parts(&value.ty).ok_or_else(|| {
+        SemanticError::new(
+            SemanticErrorKind::SliceSourceNotVector,
+            "slice source must be an unsigned or signed vector",
+            value.span,
+        )
+    })?;
+    let offset = normalize_width(resolve_const(offset, &context.generics)?)?;
+    let width = resolve_width(width, &context.generics)?;
+    let end = normalize_width(WidthExpr::Add(
+        Box::new(offset.clone()),
+        Box::new(width.clone()),
+    ))?;
+    if !prove_ge(&source_width, &end, &context.generics)? {
+        let kind = if matches!((&source_width,&end),(WidthExpr::Constant(s),WidthExpr::Constant(e)) if e>s)
+        {
+            SemanticErrorKind::SliceOutOfBounds
+        } else {
+            SemanticErrorKind::SliceRangeUnknown
+        };
+        return Err(SemanticError::new(
+            kind,
+            "cannot prove that slice range fits within source width",
+            span,
+        ));
+    }
+    let ty = unsigned_width_type(width.clone()).ok_or_else(|| {
+        SemanticError::new(
+            SemanticErrorKind::ConcatWidthOverflow,
+            "slice result width exceeds supported concrete width",
+            span,
+        )
+    })?;
+    Ok(TypedExpr {
+        kind: TypedExprKind::Slice {
+            value: Box::new(value),
+            offset,
+            width,
+        },
+        ty,
+        span,
+    })
+}
+fn check_concat(
+    values: &[Spanned<Expr>],
+    context: &ModuleContext,
+    span: Span,
+) -> Result<TypedExpr, SemanticError> {
+    if values.len() < 2 {
+        return Err(SemanticError::new(
+            SemanticErrorKind::InvalidConcatOperand,
+            "concat requires at least two operands",
+            span,
+        ));
+    }
+    let mut operands = Vec::new();
+    for value in values {
+        let typed = check_expr(value, None, context)?;
+        if let TypedExprKind::Concat { values } = typed.kind {
+            operands.extend(values);
+        } else {
+            operands.push(typed);
+        }
+    }
+    let mut width = WidthExpr::Constant(0);
+    for operand in &operands {
+        let part = operand_width(&operand.ty).ok_or_else(|| {
+            SemanticError::new(
+                SemanticErrorKind::InvalidConcatOperand,
+                "concat operand must be bit or vector",
+                operand.span,
+            )
+        })?;
+        width =
+            normalize_width(WidthExpr::Add(Box::new(width), Box::new(part))).map_err(|mut e| {
+                e.kind = SemanticErrorKind::ConcatWidthOverflow;
+                e
+            })?;
+    }
+    let ty = unsigned_width_type(width.clone()).ok_or_else(|| {
+        SemanticError::new(
+            SemanticErrorKind::ConcatWidthOverflow,
+            "concat result width exceeds supported concrete width",
+            span,
+        )
+    })?;
+    Ok(TypedExpr {
+        kind: TypedExprKind::Concat { values: operands },
+        ty,
+        span,
+    })
+}
+fn operand_width(ty: &HardwareType) -> Option<WidthExpr> {
+    if *ty == HardwareType::Bit {
+        Some(WidthExpr::Constant(1))
+    } else {
+        vector_parts(ty).map(|(_, w)| w)
+    }
+}
+fn unsigned_width_type(width: WidthExpr) -> Option<HardwareType> {
+    match width {
+        WidthExpr::Constant(v) => u32::try_from(v).ok().map(HardwareType::Unsigned),
+        value => Some(HardwareType::SymbolicUnsigned(value)),
+    }
+}
+fn concat_hint(values: &[Spanned<Expr>], context: &ModuleContext) -> Option<HardwareType> {
+    let mut width = WidthExpr::Constant(0);
+    for value in values {
+        let ty = type_hint(value, context)?;
+        width = normalize_width(WidthExpr::Add(
+            Box::new(width),
+            Box::new(operand_width(&ty)?),
+        ))
+        .ok()?;
+    }
+    unsigned_width_type(width)
+}
+
 fn vector_parts(ty: &HardwareType) -> Option<(bool, WidthExpr)> {
     match ty {
         HardwareType::Unsigned(w) => Some((false, WidthExpr::Constant(u64::from(*w)))),
@@ -1375,6 +1512,10 @@ fn type_hint(expr: &Spanned<Expr>, context: &ModuleContext) -> Option<HardwareTy
         Expr::Resize { target, .. } | Expr::Truncate { target, .. } => {
             type_from_ast(&target.value, &context.generics).ok()
         }
+        Expr::Slice { width, .. } => resolve_width(width, &context.generics)
+            .ok()
+            .and_then(unsigned_width_type),
+        Expr::Concat { values } => concat_hint(values, context),
         Expr::Call { callee, arguments } => match callee.name.as_str() {
             "=" | "/=" | "<" | "<=" | ">" | ">=" => Some(HardwareType::Bit),
             "not" => arguments.first().and_then(|arg| type_hint(arg, context)),

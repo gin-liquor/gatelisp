@@ -90,6 +90,7 @@ fn architecture(out: &mut String, value: &VhdlArchitecture) {
             VhdlDeclaration::BoolToStdLogicFunction => out.push_str("  function gl_bool_to_sl(value : boolean) return std_logic is\n  begin\n    if value then\n      return '1';\n    else\n      return '0';\n    end if;\n  end function gl_bool_to_sl;\n"),
             VhdlDeclaration::TruncateUnsignedFunction => out.push_str("  function gl_truncate_unsigned(value : unsigned; size : positive) return unsigned is\n  begin\n    return value(value'low + size - 1 downto value'low);\n  end function gl_truncate_unsigned;\n"),
             VhdlDeclaration::TruncateSignedFunction => out.push_str("  function gl_truncate_signed(value : signed; size : positive) return signed is\n  begin\n    return value(value'low + size - 1 downto value'low);\n  end function gl_truncate_signed;\n"),
+            VhdlDeclaration::BitToVectorFunction => out.push_str("  function gl_bit_to_slv(value : std_logic) return std_logic_vector is\n  begin\n    return std_logic_vector'(0 => value);\n  end function gl_bit_to_slv;\n"),
             VhdlDeclaration::Constant { name, ty, value } => { let _ = writeln!(out, "  constant {} : {} := {};", name.0, ty, expr(value)); }
         }
     }
@@ -270,6 +271,13 @@ fn expr(value: &VhdlExpression) -> String {
             "{}({})",
             function.0,
             arguments.iter().map(expr).collect::<Vec<_>>().join(", ")
+        ),
+        VhdlExpression::Slice { value, high, low } => {
+            format!("{}({} downto {})", expr(value), expr(high), expr(low))
+        }
+        VhdlExpression::Concatenate(values) => format!(
+            "({})",
+            values.iter().map(expr).collect::<Vec<_>>().join(" & ")
         ),
     }
 }
