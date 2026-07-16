@@ -1,4 +1,4 @@
-use hlisp::{ErrorKind, Lexer, SExpr, TokenKind, parse_document};
+use gatelisp::{ErrorKind, Lexer, SExpr, TokenKind, parse_document};
 
 #[test]
 fn parses_empty_nested_and_multiple_lists() {

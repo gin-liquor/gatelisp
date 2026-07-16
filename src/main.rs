@@ -18,7 +18,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match hlisp::parse_document(&source) {
+    match gatelisp::parse_document(&source) {
         Ok(ast) => {
             println!("{ast:#?}");
             ExitCode::SUCCESS
