@@ -54,6 +54,11 @@ pub enum VhdlDeclaration {
         initial: Option<VhdlExpression>,
     },
     BoolToStdLogicFunction,
+    Constant {
+        name: VhdlIdentifier,
+        ty: String,
+        value: VhdlExpression,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +68,11 @@ pub enum VhdlConcurrentStatement {
         value: VhdlExpression,
     },
     Process(VhdlProcess),
+    EntityInstance {
+        label: VhdlIdentifier,
+        entity: VhdlIdentifier,
+        ports: Vec<(VhdlIdentifier, VhdlIdentifier)>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +85,7 @@ pub struct VhdlProcess {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VhdlSensitivity {
+    None,
     All,
     Signals(Vec<VhdlIdentifier>),
 }
@@ -100,6 +111,22 @@ pub enum VhdlSequentialStatement {
         then_statements: Vec<VhdlSequentialStatement>,
         else_statements: Vec<VhdlSequentialStatement>,
     },
+    WaitFor(VhdlExpression),
+    WaitUntil(VhdlExpression),
+    ForLoop {
+        variable: VhdlIdentifier,
+        from: u32,
+        to: u32,
+        statements: Vec<VhdlSequentialStatement>,
+    },
+    InfiniteLoop(Vec<VhdlSequentialStatement>),
+    Assert {
+        condition: VhdlExpression,
+        message: String,
+    },
+    Report(String),
+    Stop,
+    Wait,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

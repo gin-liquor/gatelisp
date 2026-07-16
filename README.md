@@ -92,6 +92,34 @@ Generated names use stable IDs plus a lowercase ASCII-sanitized source name,
 such as `gl_m0_and_gate`, `gl_p0_clk`, and `gl_s4_count`. IDs guarantee that
 case-only differences, reserved words, Unicode, and punctuation cannot collide.
 
+## Testbenches and simulation
+
+GateLisp sources may contain top-level `testbench` forms alongside modules. A
+testbench names its DUT with `(target module-name)`, declares zero or more
+generated clocks, and ends with a `stimulus` block containing `drive`, `wait`,
+`wait-rising`, and `assert` statements. Supported time units are `fs`, `ps`,
+`ns`, `us`, `ms`, and `sec`; a clock period denotes one complete cycle.
+
+Testbenches may observe all DUT ports, but may drive only non-clock input ports.
+Internal wires and registers are intentionally invisible. Inputs are initialized
+to zero, while outputs are observation-only. After `wait-rising`, the generated
+testbench waits an additional 1 fs so register and combinational delta-cycle
+updates are visible to the following assertion. Stimulus completion reports a
+PASS message, calls VHDL-2008 `std.env.stop`, and waits permanently.
+
+Run testbenches with GHDL using:
+
+```console
+cargo run --bin glispc -- test examples/counter_test.glisp
+cargo run --bin glispc -- test examples/counter_test.glisp --vcd target/counter.vcd
+```
+
+PowerShell uses the same commands on one line. `--testbench <name>` selects one
+testbench; `--ghdl <path>` selects the executable; and `--work-dir <path>` sets
+the isolated simulation work root. Each testbench receives its own work
+directory. GHDL is required for `glispc test`. VCD files can be viewed with a
+waveform viewer such as GTKWave.
+
 When GHDL is installed, generated output can be analyzed as VHDL-2008:
 
 ```console
@@ -102,5 +130,6 @@ Source files use the `.glisp` extension. `Position::offset` is a zero-based
 UTF-8 byte offset. Line and column numbers are one-based, columns count Unicode
 scalar values, and spans are half-open.
 
-FSMs, module instances, generics, macros, automatic testbench generation, and
-CDC analysis are not implemented. Synchronizers are not inserted automatically.
+FSMs, general module instances, generics, macros, random stimulus, file I/O, and
+CDC analysis are not implemented. The DUT instance emitted inside a generated
+testbench is backend-only; synchronizers are not inserted automatically.

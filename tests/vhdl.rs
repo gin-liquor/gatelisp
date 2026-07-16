@@ -145,6 +145,7 @@ fn rejects_nonliteral_initializers_and_invalid_hir() {
             assignments: vec![],
             clocked_blocks: vec![],
         }],
+        testbenches: vec![],
     };
     assert_eq!(
         lower_to_vhdl(&invalid).unwrap_err().kind,
@@ -169,6 +170,7 @@ fn rejects_nonliteral_initializers_and_invalid_hir() {
                 span,
             }],
         }],
+        testbenches: vec![],
     };
     assert_eq!(
         lower_to_vhdl(&missing).unwrap_err().kind,

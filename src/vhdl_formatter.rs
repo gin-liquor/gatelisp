@@ -11,7 +11,9 @@ pub fn render_vhdl(design: &VhdlDesign) -> String {
         if index > 0 {
             out.push('\n');
         }
-        context(&mut out);
+        let simulation =
+            matches!(unit, VhdlDesignUnit::Architecture(value) if value.name.0 == "sim");
+        context(&mut out, simulation);
         match unit {
             VhdlDesignUnit::Entity(value) => entity(&mut out, value),
             VhdlDesignUnit::Architecture(value) => architecture(&mut out, value),
@@ -20,8 +22,12 @@ pub fn render_vhdl(design: &VhdlDesign) -> String {
     out
 }
 
-fn context(out: &mut String) {
-    out.push_str("library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\n");
+fn context(out: &mut String, simulation: bool) {
+    out.push_str("library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n");
+    if simulation {
+        out.push_str("library std;\nuse std.env.all;\n");
+    }
+    out.push('\n');
 }
 
 fn entity(out: &mut String, value: &VhdlEntity) {
@@ -62,6 +68,7 @@ fn architecture(out: &mut String, value: &VhdlArchitecture) {
                 out.push_str(";\n");
             }
             VhdlDeclaration::BoolToStdLogicFunction => out.push_str("  function gl_bool_to_sl(value : boolean) return std_logic is\n  begin\n    if value then\n      return '1';\n    else\n      return '0';\n    end if;\n  end function gl_bool_to_sl;\n"),
+            VhdlDeclaration::Constant { name, ty, value } => { let _ = writeln!(out, "  constant {} : {} := {};", name.0, ty, expr(value)); }
         }
     }
     out.push_str("begin\n");
@@ -77,11 +84,25 @@ fn concurrent(out: &mut String, statement: &VhdlConcurrentStatement) {
             let _ = writeln!(out, "  {} <= {};", target.0, expr(value));
         }
         VhdlConcurrentStatement::Process(process) => process_text(out, process),
+        VhdlConcurrentStatement::EntityInstance {
+            label,
+            entity,
+            ports,
+        } => {
+            let _ = writeln!(out, "  {} : entity work.{}", label.0, entity.0);
+            out.push_str("    port map (\n");
+            for (index, (formal, actual)) in ports.iter().enumerate() {
+                let suffix = if index + 1 == ports.len() { "" } else { "," };
+                let _ = writeln!(out, "      {} => {}{}", formal.0, actual.0, suffix);
+            }
+            out.push_str("    );\n");
+        }
     }
 }
 
 fn process_text(out: &mut String, process: &VhdlProcess) {
     let sensitivity = match &process.sensitivity {
+        VhdlSensitivity::None => String::new(),
         VhdlSensitivity::All => "all".to_owned(),
         VhdlSensitivity::Signals(values) => values
             .iter()
@@ -89,7 +110,11 @@ fn process_text(out: &mut String, process: &VhdlProcess) {
             .collect::<Vec<_>>()
             .join(", "),
     };
-    let _ = writeln!(out, "  {} : process({})", process.label.0, sensitivity);
+    if sensitivity.is_empty() {
+        let _ = writeln!(out, "  {} : process", process.label.0);
+    } else {
+        let _ = writeln!(out, "  {} : process({})", process.label.0, sensitivity);
+    }
     for variable in &process.variables {
         let _ = writeln!(
             out,
@@ -126,8 +151,51 @@ fn statements(out: &mut String, values: &[VhdlSequentialStatement], level: usize
                 }
                 let _ = writeln!(out, "{pad}end if;");
             }
+            VhdlSequentialStatement::WaitFor(value) => {
+                let _ = writeln!(out, "{pad}wait for {};", expr(value));
+            }
+            VhdlSequentialStatement::WaitUntil(value) => {
+                let _ = writeln!(out, "{pad}wait until {};", expr(value));
+            }
+            VhdlSequentialStatement::ForLoop {
+                variable,
+                from,
+                to,
+                statements: body,
+            } => {
+                let _ = writeln!(out, "{pad}for {} in {} to {} loop", variable.0, from, to);
+                statements(out, body, level + 1);
+                let _ = writeln!(out, "{pad}end loop;");
+            }
+            VhdlSequentialStatement::InfiniteLoop(body) => {
+                let _ = writeln!(out, "{pad}loop");
+                statements(out, body, level + 1);
+                let _ = writeln!(out, "{pad}end loop;");
+            }
+            VhdlSequentialStatement::Assert { condition, message } => {
+                let _ = writeln!(out, "{pad}assert {}", expr(condition));
+                let _ = writeln!(out, "{pad}  report \"{}\"", escape_string(message));
+                let _ = writeln!(out, "{pad}  severity error;");
+            }
+            VhdlSequentialStatement::Report(message) => {
+                let _ = writeln!(
+                    out,
+                    "{pad}report \"{}\" severity note;",
+                    escape_string(message)
+                );
+            }
+            VhdlSequentialStatement::Stop => {
+                let _ = writeln!(out, "{pad}stop;");
+            }
+            VhdlSequentialStatement::Wait => {
+                let _ = writeln!(out, "{pad}wait;");
+            }
         }
     }
+}
+
+fn escape_string(value: &str) -> String {
+    value.replace('"', "\"\"").replace(['\r', '\n'], " ")
 }
 
 fn type_text(value: &VhdlType) -> String {

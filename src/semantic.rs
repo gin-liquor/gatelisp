@@ -5,9 +5,10 @@ use std::{
 
 use crate::{
     BinaryOp, ClockEdge, ClockedBlockId, ClockedDecl, Expr, HardwareType, ModuleDecl, ModuleId,
-    ModuleItem, NextStmt, PortDirection, Program, SignalId, SignalKind, Span, Spanned, TypeExpr,
-    TypedAssign, TypedClockedBlock, TypedExpr, TypedExprKind, TypedModule, TypedNext, TypedProgram,
-    TypedReset, TypedSignal, UnaryOp,
+    ModuleItem, NextStmt, PortDirection, Program, SignalId, SignalKind, SimulationTime, Span,
+    Spanned, TestbenchDecl, TestbenchId, TestbenchStmt, TypeExpr, TypedAssign, TypedClockedBlock,
+    TypedExpr, TypedExprKind, TypedModule, TypedNext, TypedProgram, TypedReset, TypedSignal,
+    TypedTestbench, TypedTestbenchClock, TypedTestbenchStmt, UnaryOp,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +44,15 @@ pub enum SemanticErrorKind {
     NextTypeMismatch,
     ResetTargetMissing,
     ResetTargetExtra,
+    DuplicateTestbench,
+    UnknownTestbenchTarget,
+    InvalidTestbenchClock,
+    DuplicateTestbenchClock,
+    InvalidDriveTarget,
+    DriveClock,
+    InvalidTestbenchReference,
+    InvalidAssertType,
+    UnknownWaitClock,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,7 +136,54 @@ pub fn analyze_program(program: &Program) -> Result<TypedProgram, SemanticError>
             &mut next_clocked,
         )?);
     }
-    Ok(TypedProgram { modules })
+    let module_indexes = modules
+        .iter()
+        .enumerate()
+        .map(|(index, module)| (module.name.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let mut testbench_names = HashMap::new();
+    let mut testbenches = Vec::new();
+    for (index, testbench) in program.testbenches.iter().enumerate() {
+        if let Some(previous) = testbench_names.insert(
+            testbench.value.name.name.as_str(),
+            testbench.value.name.span,
+        ) {
+            return Err(SemanticError::new(
+                SemanticErrorKind::DuplicateTestbench,
+                format!("duplicate testbench `{}`", testbench.value.name.name),
+                testbench.value.name.span,
+            )
+            .related(previous));
+        }
+        let module_index = *module_indexes
+            .get(testbench.value.target.name.as_str())
+            .ok_or_else(|| {
+                SemanticError::new(
+                    SemanticErrorKind::UnknownTestbenchTarget,
+                    format!("unknown target module `{}`", testbench.value.target.name),
+                    testbench.value.target.span,
+                )
+            })?;
+        let module = modules.get(module_index).ok_or_else(|| {
+            SemanticError::new(
+                SemanticErrorKind::UnknownTestbenchTarget,
+                "target module index is invalid",
+                testbench.value.target.span,
+            )
+        })?;
+        let id = TestbenchId(u32::try_from(index).map_err(|_| {
+            SemanticError::new(
+                SemanticErrorKind::CannotInferType,
+                "too many testbenches",
+                testbench.span,
+            )
+        })?);
+        testbenches.push(analyze_testbench(testbench, id, module)?);
+    }
+    Ok(TypedProgram {
+        modules,
+        testbenches,
+    })
 }
 
 fn analyze_module(
@@ -240,6 +297,154 @@ fn analyze_module(
         assignments,
         clocked_blocks,
         span: module.span,
+    })
+}
+
+fn analyze_testbench(
+    testbench: &Spanned<TestbenchDecl>,
+    id: TestbenchId,
+    module: &TypedModule,
+) -> Result<TypedTestbench, SemanticError> {
+    let mut context = ModuleContext {
+        signals: Vec::new(),
+        names: HashMap::new(),
+    };
+    for signal in &module.signals {
+        let class = match signal.kind {
+            SignalKind::Input => SignalClass::Input,
+            SignalKind::Output => SignalClass::Output,
+            _ => continue,
+        };
+        context
+            .names
+            .insert(signal.name.clone(), context.signals.len());
+        context.signals.push(SignalInfo {
+            id: signal.id,
+            name: signal.name.clone(),
+            ty: signal.ty.clone(),
+            class,
+            declaration_span: signal.declaration_span,
+            initial: None,
+        });
+    }
+    let mut clock_ids = HashSet::new();
+    let mut clocks = Vec::new();
+    for clock in &testbench.value.clocks {
+        let info = lookup(&context, &clock.value.signal.name).ok_or_else(|| {
+            SemanticError::new(
+                SemanticErrorKind::InvalidTestbenchClock,
+                format!("unknown testbench clock `{}`", clock.value.signal.name),
+                clock.value.signal.span,
+            )
+        })?;
+        if info.class != SignalClass::Input || info.ty != HardwareType::Bit {
+            return Err(SemanticError::new(
+                SemanticErrorKind::InvalidTestbenchClock,
+                "testbench clock must be an input bit",
+                clock.value.signal.span,
+            ));
+        }
+        if !clock_ids.insert(info.id) {
+            return Err(SemanticError::new(
+                SemanticErrorKind::DuplicateTestbenchClock,
+                "duplicate testbench clock",
+                clock.value.signal.span,
+            ));
+        }
+        clocks.push(TypedTestbenchClock {
+            signal: info.id,
+            period: SimulationTime {
+                value: clock.value.period.value,
+                unit: clock.value.period.unit,
+            },
+            span: clock.span,
+        });
+    }
+    let mut statements = Vec::new();
+    for statement in &testbench.value.stimulus {
+        let typed = match &statement.value {
+            TestbenchStmt::Drive { target, value } => {
+                let info = lookup(&context, &target.name).ok_or_else(|| {
+                    SemanticError::new(
+                        SemanticErrorKind::InvalidDriveTarget,
+                        format!("unknown drive target `{}`", target.name),
+                        target.span,
+                    )
+                })?;
+                if info.class != SignalClass::Input {
+                    return Err(SemanticError::new(
+                        SemanticErrorKind::InvalidDriveTarget,
+                        "drive target must be an input port",
+                        target.span,
+                    ));
+                }
+                if clock_ids.contains(&info.id) {
+                    return Err(SemanticError::new(
+                        SemanticErrorKind::DriveClock,
+                        "clock input cannot be driven by stimulus",
+                        target.span,
+                    ));
+                }
+                TypedTestbenchStmt::Drive {
+                    target: info.id,
+                    value: check_expr(value, Some(&info.ty), &context)?,
+                    span: statement.span,
+                }
+            }
+            TestbenchStmt::Wait { duration } => TypedTestbenchStmt::Wait {
+                duration: SimulationTime {
+                    value: duration.value,
+                    unit: duration.unit,
+                },
+                span: statement.span,
+            },
+            TestbenchStmt::WaitRising { clock, count } => {
+                let info = lookup(&context, &clock.name).ok_or_else(|| {
+                    SemanticError::new(
+                        SemanticErrorKind::UnknownWaitClock,
+                        format!("unknown wait clock `{}`", clock.name),
+                        clock.span,
+                    )
+                })?;
+                if !clock_ids.contains(&info.id) {
+                    return Err(SemanticError::new(
+                        SemanticErrorKind::UnknownWaitClock,
+                        "wait-rising requires a declared testbench clock",
+                        clock.span,
+                    ));
+                }
+                TypedTestbenchStmt::WaitRising {
+                    clock: info.id,
+                    count: *count,
+                    span: statement.span,
+                }
+            }
+            TestbenchStmt::Assert { condition, message } => {
+                let condition = check_expr(condition, Some(&HardwareType::Bit), &context).map_err(
+                    |mut error| {
+                        if error.kind == SemanticErrorKind::TypeMismatch {
+                            error.kind = SemanticErrorKind::InvalidAssertType;
+                            error.message = "assert condition must have type bit".into();
+                        }
+                        error
+                    },
+                )?;
+                TypedTestbenchStmt::Assert {
+                    condition,
+                    message: message.clone(),
+                    span: statement.span,
+                }
+            }
+        };
+        statements.push(typed);
+    }
+    Ok(TypedTestbench {
+        id,
+        name: testbench.value.name.name.clone(),
+        target: module.id,
+        clocks,
+        statements,
+        span: testbench.span,
     })
 }
 

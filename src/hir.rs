@@ -9,6 +9,9 @@ pub struct SignalId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClockedBlockId(pub u32);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TestbenchId(pub u32);
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum HardwareType {
     Bit,
@@ -19,6 +22,53 @@ pub enum HardwareType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedProgram {
     pub modules: Vec<TypedModule>,
+    pub testbenches: Vec<TypedTestbench>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedTestbench {
+    pub id: TestbenchId,
+    pub name: String,
+    pub target: ModuleId,
+    pub clocks: Vec<TypedTestbenchClock>,
+    pub statements: Vec<TypedTestbenchStmt>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedTestbenchClock {
+    pub signal: SignalId,
+    pub period: SimulationTime,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SimulationTime {
+    pub value: u64,
+    pub unit: crate::TimeUnit,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypedTestbenchStmt {
+    Drive {
+        target: SignalId,
+        value: TypedExpr,
+        span: Span,
+    },
+    Wait {
+        duration: SimulationTime,
+        span: Span,
+    },
+    WaitRising {
+        clock: SignalId,
+        count: u32,
+        span: Span,
+    },
+    Assert {
+        condition: TypedExpr,
+        message: String,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -3,6 +3,56 @@ use crate::{Span, Spanned};
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub modules: Vec<Spanned<ModuleDecl>>,
+    pub testbenches: Vec<Spanned<TestbenchDecl>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TestbenchDecl {
+    pub name: Identifier,
+    pub target: Identifier,
+    pub clocks: Vec<Spanned<TestbenchClockDecl>>,
+    pub stimulus: Vec<Spanned<TestbenchStmt>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TestbenchClockDecl {
+    pub signal: Identifier,
+    pub period: TimeLiteral,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeLiteral {
+    pub value: u64,
+    pub unit: TimeUnit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeUnit {
+    Femtosecond,
+    Picosecond,
+    Nanosecond,
+    Microsecond,
+    Millisecond,
+    Second,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TestbenchStmt {
+    Drive {
+        target: Identifier,
+        value: Spanned<Expr>,
+    },
+    Wait {
+        duration: TimeLiteral,
+    },
+    WaitRising {
+        clock: Identifier,
+        count: u32,
+    },
+    Assert {
+        condition: Spanned<Expr>,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

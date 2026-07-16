@@ -1,0 +1,13 @@
+(module and-gate
+  (ports (a :in bit) (b :in bit) (y :out bit))
+  (assign y (and a b)))
+
+(testbench and-gate-test
+  (target and-gate)
+  (stimulus
+    (drive a 0) (drive b 0) (wait 1 ns)
+    (assert (= y 0) "0 and 0")
+    (drive a 1) (drive b 0) (wait 1 ns)
+    (assert (= y 0) "1 and 0")
+    (drive a 1) (drive b 1) (wait 1 ns)
+    (assert (= y 1) "1 and 1")))

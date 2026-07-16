@@ -8,6 +8,7 @@ mod lexer;
 mod parser;
 mod semantic;
 mod sexpr;
+mod simulation;
 mod source;
 mod token;
 mod vhdl_ast;
@@ -24,6 +25,9 @@ pub use lexer::Lexer;
 pub use parser::parse_document;
 pub use semantic::{SemanticError, SemanticErrorKind, analyze_program};
 pub use sexpr::SExpr;
+pub use simulation::{
+    SimulationError, SimulationOptions, SimulationResult, SimulationStage, simulate_source,
+};
 pub use source::{Position, Span, Spanned};
 pub use token::{Token, TokenKind};
 pub use vhdl_ast::*;

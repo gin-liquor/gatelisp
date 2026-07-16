@@ -1,0 +1,17 @@
+(module counter
+  (ports (clk :in bit) (rst :in bit) (enable :in bit) (q :out (unsigned 8)))
+  (reg count (unsigned 8) 0)
+  (clocked clk
+    (reset :sync rst (next count 0))
+    (next count (if enable (+ count 1) count)))
+  (assign q count))
+
+(testbench counter-test
+  (target counter)
+  (clock clk 10 ns)
+  (stimulus
+    (drive rst 1) (drive enable 0) (wait 20 ns)
+    (drive rst 0) (drive enable 1) (wait-rising clk 3)
+    (assert (= q 3) "counter must reach 3")
+    (drive enable 0) (wait-rising clk 2)
+    (assert (= q 3) "counter must hold while disabled")))

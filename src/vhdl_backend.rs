@@ -1,9 +1,10 @@
 use crate::{
-    BinaryOp, ClockEdge, HardwareType, ModuleId, ResetKind, SignalId, SignalKind,
-    TypedClockedBlock, TypedExpr, TypedExprKind, TypedModule, TypedNext, TypedProgram, UnaryOp,
-    VhdlArchitecture, VhdlConcurrentStatement, VhdlDeclaration, VhdlDesign, VhdlDesignUnit,
-    VhdlEntity, VhdlExpression, VhdlIdentifier, VhdlPort, VhdlPortMode, VhdlProcess,
-    VhdlSensitivity, VhdlSequentialStatement, VhdlType, VhdlVariable,
+    BinaryOp, ClockEdge, HardwareType, ModuleId, ResetKind, SignalId, SignalKind, TimeUnit,
+    TypedClockedBlock, TypedExpr, TypedExprKind, TypedModule, TypedNext, TypedProgram,
+    TypedTestbench, TypedTestbenchStmt, UnaryOp, VhdlArchitecture, VhdlConcurrentStatement,
+    VhdlDeclaration, VhdlDesign, VhdlDesignUnit, VhdlEntity, VhdlExpression, VhdlIdentifier,
+    VhdlPort, VhdlPortMode, VhdlProcess, VhdlSensitivity, VhdlSequentialStatement, VhdlType,
+    VhdlVariable,
 };
 use std::{collections::HashMap, fmt};
 
@@ -55,6 +56,21 @@ pub fn lower_to_vhdl(program: &TypedProgram) -> Result<VhdlDesign, VhdlBackendEr
     let mut units = Vec::new();
     for module in &program.modules {
         let (entity, architecture) = lower_module(module)?;
+        units.push(VhdlDesignUnit::Entity(entity));
+        units.push(VhdlDesignUnit::Architecture(architecture));
+    }
+    for testbench in &program.testbenches {
+        let module = program
+            .modules
+            .iter()
+            .find(|module| module.id == testbench.target)
+            .ok_or_else(|| {
+                VhdlBackendError::new(
+                    VhdlBackendErrorKind::InconsistentId,
+                    "testbench target ModuleId is missing",
+                )
+            })?;
+        let (entity, architecture) = lower_testbench(testbench, module)?;
         units.push(VhdlDesignUnit::Entity(entity));
         units.push(VhdlDesignUnit::Architecture(architecture));
     }
@@ -285,6 +301,176 @@ fn lower_updates(
         statements.push(VhdlSequentialStatement::SignalAssignment { target, value });
     }
     Ok(statements)
+}
+
+fn lower_testbench(
+    testbench: &TypedTestbench,
+    module: &TypedModule,
+) -> Result<(VhdlEntity, VhdlArchitecture), VhdlBackendError> {
+    let entity_name = VhdlIdentifier(format!(
+        "gl_tb{}_{}",
+        testbench.id.0,
+        sanitize(&testbench.name)
+    ));
+    let mut declarations = vec![VhdlDeclaration::BoolToStdLogicFunction];
+    let mut names = HashMap::new();
+    let mut port_map = Vec::new();
+    for signal in &module.signals {
+        let is_input = matches!(signal.kind, SignalKind::Input);
+        if !is_input && !matches!(signal.kind, SignalKind::Output) {
+            continue;
+        }
+        let ty = lower_type(&signal.ty)?;
+        let tb_name = VhdlIdentifier(format!("gl_tb_s{}_{}", signal.id.0, sanitize(&signal.name)));
+        let initial = if is_input {
+            Some(zero_value(&ty))
+        } else {
+            None
+        };
+        declarations.push(VhdlDeclaration::Signal {
+            name: tb_name.clone(),
+            ty: ty.clone(),
+            initial,
+        });
+        let formal = VhdlIdentifier(format!("gl_p{}_{}", signal.id.0, sanitize(&signal.name)));
+        port_map.push((formal, tb_name.clone()));
+        insert_name(
+            &mut names,
+            signal.id,
+            SignalNames {
+                read: tb_name,
+                port: None,
+            },
+        )?;
+    }
+    let mut statements = vec![VhdlConcurrentStatement::EntityInstance {
+        label: VhdlIdentifier("gl_dut".into()),
+        entity: module_name(module.id, &module.name),
+        ports: port_map,
+    }];
+    for (index, clock) in testbench.clocks.iter().enumerate() {
+        let signal = signal_name(&names, clock.signal)?.read.clone();
+        let constant = VhdlIdentifier(format!("gl_clk_period_{index}"));
+        declarations.push(VhdlDeclaration::Constant {
+            name: constant.clone(),
+            ty: "time".into(),
+            value: time_expression(&clock.period),
+        });
+        statements.push(VhdlConcurrentStatement::Process(VhdlProcess {
+            label: VhdlIdentifier(format!("gl_clock_{index}")),
+            sensitivity: VhdlSensitivity::None,
+            variables: vec![],
+            statements: vec![VhdlSequentialStatement::InfiniteLoop(vec![
+                VhdlSequentialStatement::WaitFor(VhdlExpression::Binary {
+                    op: "/".into(),
+                    left: Box::new(VhdlExpression::Name(constant)),
+                    right: Box::new(VhdlExpression::Literal("2".into())),
+                }),
+                VhdlSequentialStatement::SignalAssignment {
+                    target: signal.clone(),
+                    value: VhdlExpression::Unary {
+                        op: "not".into(),
+                        operand: Box::new(VhdlExpression::Name(signal)),
+                    },
+                },
+            ])],
+        }));
+    }
+    let mut context = LowerContext {
+        names,
+        temporary: 0,
+        variables: Vec::new(),
+    };
+    let mut stimulus = Vec::new();
+    for statement in &testbench.statements {
+        match statement {
+            TypedTestbenchStmt::Drive { target, value, .. } => {
+                let target = signal_name(&context.names, *target)?.read.clone();
+                let value = lower_expr(value, &mut context, &mut stimulus)?;
+                stimulus.push(VhdlSequentialStatement::SignalAssignment { target, value });
+            }
+            TypedTestbenchStmt::Wait { duration, .. } => {
+                stimulus.push(VhdlSequentialStatement::WaitFor(time_expression(duration)))
+            }
+            TypedTestbenchStmt::WaitRising { clock, count, .. } => {
+                let clock = signal_name(&context.names, *clock)?.read.clone();
+                let wait = VhdlSequentialStatement::WaitUntil(VhdlExpression::Call {
+                    function: VhdlIdentifier("rising_edge".into()),
+                    arguments: vec![VhdlExpression::Name(clock)],
+                });
+                if *count == 1 {
+                    stimulus.push(wait);
+                } else {
+                    stimulus.push(VhdlSequentialStatement::ForLoop {
+                        variable: VhdlIdentifier("gl_wait_index".into()),
+                        from: 1,
+                        to: *count,
+                        statements: vec![wait],
+                    });
+                }
+                stimulus.push(VhdlSequentialStatement::WaitFor(VhdlExpression::Literal(
+                    "1 fs".into(),
+                )));
+            }
+            TypedTestbenchStmt::Assert {
+                condition, message, ..
+            } => {
+                let condition = lower_expr(condition, &mut context, &mut stimulus)?;
+                stimulus.push(VhdlSequentialStatement::Assert {
+                    condition: VhdlExpression::Binary {
+                        op: "=".into(),
+                        left: Box::new(condition),
+                        right: Box::new(VhdlExpression::Literal("'1'".into())),
+                    },
+                    message: message.clone(),
+                });
+            }
+        }
+    }
+    stimulus.push(VhdlSequentialStatement::Report(format!(
+        "GateLisp testbench passed: {}",
+        testbench.name
+    )));
+    stimulus.push(VhdlSequentialStatement::Stop);
+    stimulus.push(VhdlSequentialStatement::Wait);
+    statements.push(VhdlConcurrentStatement::Process(VhdlProcess {
+        label: VhdlIdentifier("gl_stimulus".into()),
+        sensitivity: VhdlSensitivity::None,
+        variables: context.variables,
+        statements: stimulus,
+    }));
+    Ok((
+        VhdlEntity {
+            name: entity_name.clone(),
+            ports: vec![],
+        },
+        VhdlArchitecture {
+            name: VhdlIdentifier("sim".into()),
+            entity_name,
+            declarations,
+            statements,
+        },
+    ))
+}
+
+fn zero_value(ty: &VhdlType) -> VhdlExpression {
+    match ty {
+        VhdlType::StdLogic => VhdlExpression::Literal("'0'".into()),
+        VhdlType::Unsigned(_) | VhdlType::Signed(_) => {
+            VhdlExpression::Literal("(others => '0')".into())
+        }
+    }
+}
+fn time_expression(time: &crate::SimulationTime) -> VhdlExpression {
+    let unit = match time.unit {
+        TimeUnit::Femtosecond => "fs",
+        TimeUnit::Picosecond => "ps",
+        TimeUnit::Nanosecond => "ns",
+        TimeUnit::Microsecond => "us",
+        TimeUnit::Millisecond => "ms",
+        TimeUnit::Second => "sec",
+    };
+    VhdlExpression::Literal(format!("{} {unit}", time.value))
 }
 
 fn lower_expr(

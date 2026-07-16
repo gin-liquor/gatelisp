@@ -1,0 +1,17 @@
+(module async-counter
+  (ports (clk :in bit) (rst :in bit) (q :out (unsigned 8)))
+  (reg count (unsigned 8) 0)
+  (clocked clk
+    (reset :async rst (next count 0))
+    (next count (+ count 1)))
+  (assign q count))
+
+(testbench async-counter-test
+  (target async-counter)
+  (clock clk 10 ns)
+  (stimulus
+    (drive rst 0) (wait-rising clk 2)
+    (drive rst 1) (wait 1 ns)
+    (assert (= q 0) "async reset must not wait for a clock edge")
+    (drive rst 0) (wait-rising clk 2)
+    (assert (= q 2) "counter resumes after reset")))

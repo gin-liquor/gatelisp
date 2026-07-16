@@ -2,8 +2,8 @@ use std::fmt;
 
 use crate::{
     AssignStmt, ClockedDecl, Expr, Identifier, ModuleDecl, ModuleItem, NextStmt, PortDecl,
-    PortDirection, Program, RegisterDecl, ResetDecl, ResetKind, SExpr, Span, Spanned, TypeExpr,
-    WireDecl,
+    PortDirection, Program, RegisterDecl, ResetDecl, ResetKind, SExpr, Span, Spanned,
+    TestbenchClockDecl, TestbenchDecl, TestbenchStmt, TimeLiteral, TimeUnit, TypeExpr, WireDecl,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +42,25 @@ pub enum GateParseErrorKind {
     InvalidResetItem,
     InvalidNext,
     InvalidNextTarget,
+    InvalidTestbench,
+    InvalidTestbenchName,
+    MissingTarget,
+    DuplicateTarget,
+    InvalidTargetPosition,
+    InvalidTargetModule,
+    InvalidTestbenchClock,
+    InvalidTime,
+    UnknownTimeUnit,
+    MissingStimulus,
+    DuplicateStimulus,
+    InvalidStimulusPosition,
+    UnknownTestbenchItem,
+    InvalidDrive,
+    InvalidDriveTarget,
+    InvalidWait,
+    InvalidWaitRising,
+    InvalidAssert,
+    InvalidAssertMessage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,11 +88,36 @@ impl fmt::Display for GateParseError {
 impl std::error::Error for GateParseError {}
 
 pub fn build_program(expressions: &[Spanned<SExpr>]) -> Result<Program, GateParseError> {
-    let modules = expressions
-        .iter()
-        .map(parse_module)
-        .collect::<Result<_, _>>()?;
-    Ok(Program { modules })
+    let mut modules = Vec::new();
+    let mut testbenches = Vec::new();
+    for expression in expressions {
+        match &expression.value {
+            SExpr::List(list) if is_symbol(list.first(), "module") => {
+                modules.push(parse_module(expression)?)
+            }
+            SExpr::List(list) if is_symbol(list.first(), "testbench") => {
+                testbenches.push(parse_testbench(expression)?)
+            }
+            SExpr::List(list) if list.is_empty() => {
+                return Err(error(
+                    GateParseErrorKind::EmptyTopLevelList,
+                    "empty list is not a top-level declaration",
+                    expression,
+                ));
+            }
+            _ => {
+                return Err(error(
+                    GateParseErrorKind::TopLevelNotModule,
+                    "top level must contain module or testbench forms",
+                    expression,
+                ));
+            }
+        }
+    }
+    Ok(Program {
+        modules,
+        testbenches,
+    })
 }
 
 fn parse_module(expression: &Spanned<SExpr>) -> Result<Spanned<ModuleDecl>, GateParseError> {
@@ -561,6 +605,303 @@ fn parse_expr(expression: &Spanned<SExpr>) -> Result<Spanned<Expr>, GateParseErr
                 expression,
             ));
         }
+    };
+    Ok(Spanned {
+        value,
+        span: expression.span,
+    })
+}
+
+fn parse_testbench(expression: &Spanned<SExpr>) -> Result<Spanned<TestbenchDecl>, GateParseError> {
+    let list = match &expression.value {
+        SExpr::List(list) => list,
+        _ => {
+            return Err(error(
+                GateParseErrorKind::InvalidTestbench,
+                "invalid testbench",
+                expression,
+            ));
+        }
+    };
+    let name_expr = list.get(1).ok_or_else(|| {
+        error(
+            GateParseErrorKind::InvalidTestbenchName,
+            "testbench name is required",
+            expression,
+        )
+    })?;
+    let name = identifier(
+        name_expr,
+        GateParseErrorKind::InvalidTestbenchName,
+        "testbench name must be a symbol",
+    )?;
+    let target_form = list.get(2).ok_or_else(|| {
+        error(
+            GateParseErrorKind::MissingTarget,
+            "target form is required after testbench name",
+            expression,
+        )
+    })?;
+    let target_list = match &target_form.value {
+        SExpr::List(values) if is_symbol(values.first(), "target") => values,
+        _ => {
+            return Err(error(
+                GateParseErrorKind::InvalidTargetPosition,
+                "target must immediately follow testbench name",
+                target_form,
+            ));
+        }
+    };
+    if target_list.len() != 2 {
+        return Err(error(
+            GateParseErrorKind::InvalidTargetModule,
+            "target form must name one module",
+            target_form,
+        ));
+    }
+    let target = identifier(
+        &target_list[1],
+        GateParseErrorKind::InvalidTargetModule,
+        "target module must be a symbol",
+    )?;
+    let mut clocks = Vec::new();
+    let mut stimulus = None;
+    for item in &list[3..] {
+        let values = match &item.value {
+            SExpr::List(values) => values,
+            _ => {
+                return Err(error(
+                    GateParseErrorKind::UnknownTestbenchItem,
+                    "testbench item must be a list",
+                    item,
+                ));
+            }
+        };
+        if is_symbol(values.first(), "target") {
+            return Err(error(
+                GateParseErrorKind::DuplicateTarget,
+                "testbench has more than one target",
+                item,
+            ));
+        }
+        if is_symbol(values.first(), "clock") {
+            if stimulus.is_some() {
+                return Err(error(
+                    GateParseErrorKind::InvalidStimulusPosition,
+                    "clock must appear before stimulus",
+                    item,
+                ));
+            }
+            clocks.push(Spanned {
+                value: parse_testbench_clock(item)?,
+                span: item.span,
+            });
+        } else if is_symbol(values.first(), "stimulus") {
+            if stimulus.is_some() {
+                return Err(error(
+                    GateParseErrorKind::DuplicateStimulus,
+                    "testbench has more than one stimulus",
+                    item,
+                ));
+            }
+            stimulus = Some(
+                values[1..]
+                    .iter()
+                    .map(parse_testbench_stmt)
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+        } else {
+            return Err(error(
+                GateParseErrorKind::UnknownTestbenchItem,
+                "unknown testbench item",
+                item,
+            ));
+        }
+    }
+    let stimulus = stimulus.ok_or_else(|| {
+        error(
+            GateParseErrorKind::MissingStimulus,
+            "stimulus form is required",
+            expression,
+        )
+    })?;
+    Ok(Spanned {
+        value: TestbenchDecl {
+            name,
+            target,
+            clocks,
+            stimulus,
+        },
+        span: expression.span,
+    })
+}
+
+fn parse_testbench_clock(
+    expression: &Spanned<SExpr>,
+) -> Result<TestbenchClockDecl, GateParseError> {
+    let list = exact_list(
+        expression,
+        4,
+        GateParseErrorKind::InvalidTestbenchClock,
+        "clock form must have four elements",
+    )?;
+    let signal = identifier(
+        &list[1],
+        GateParseErrorKind::InvalidTestbenchClock,
+        "clock signal must be a symbol",
+    )?;
+    Ok(TestbenchClockDecl {
+        signal,
+        period: parse_time(&list[2], &list[3])?,
+    })
+}
+
+fn parse_time(
+    value_expr: &Spanned<SExpr>,
+    unit: &Spanned<SExpr>,
+) -> Result<TimeLiteral, GateParseError> {
+    let value = match value_expr.value {
+        SExpr::Integer(value) if value > 0 => u64::try_from(value).map_err(|_| {
+            error(
+                GateParseErrorKind::InvalidTime,
+                "time value is out of range",
+                value_expr,
+            )
+        })?,
+        _ => {
+            return Err(error(
+                GateParseErrorKind::InvalidTime,
+                "time value must be a positive integer",
+                value_expr,
+            ));
+        }
+    };
+    let unit = match &unit.value {
+        SExpr::Symbol(name) => match name.as_str() {
+            "fs" => TimeUnit::Femtosecond,
+            "ps" => TimeUnit::Picosecond,
+            "ns" => TimeUnit::Nanosecond,
+            "us" => TimeUnit::Microsecond,
+            "ms" => TimeUnit::Millisecond,
+            "sec" => TimeUnit::Second,
+            _ => {
+                return Err(error(
+                    GateParseErrorKind::UnknownTimeUnit,
+                    "unknown time unit",
+                    unit,
+                ));
+            }
+        },
+        _ => {
+            return Err(error(
+                GateParseErrorKind::UnknownTimeUnit,
+                "time unit must be a symbol",
+                unit,
+            ));
+        }
+    };
+    Ok(TimeLiteral { value, unit })
+}
+
+fn parse_testbench_stmt(
+    expression: &Spanned<SExpr>,
+) -> Result<Spanned<TestbenchStmt>, GateParseError> {
+    let list = match &expression.value {
+        SExpr::List(values) => values,
+        _ => {
+            return Err(error(
+                GateParseErrorKind::UnknownTestbenchItem,
+                "stimulus statement must be a list",
+                expression,
+            ));
+        }
+    };
+    let value = if is_symbol(list.first(), "drive") {
+        let list = exact_list(
+            expression,
+            3,
+            GateParseErrorKind::InvalidDrive,
+            "drive must have three elements",
+        )?;
+        TestbenchStmt::Drive {
+            target: identifier(
+                &list[1],
+                GateParseErrorKind::InvalidDriveTarget,
+                "drive target must be a symbol",
+            )?,
+            value: parse_expr(&list[2])?,
+        }
+    } else if is_symbol(list.first(), "wait") {
+        let list = exact_list(
+            expression,
+            3,
+            GateParseErrorKind::InvalidWait,
+            "wait must have three elements",
+        )?;
+        TestbenchStmt::Wait {
+            duration: parse_time(&list[1], &list[2])?,
+        }
+    } else if is_symbol(list.first(), "wait-rising") {
+        if !matches!(list.len(), 2 | 3) {
+            return Err(error(
+                GateParseErrorKind::InvalidWaitRising,
+                "wait-rising must have two or three elements",
+                expression,
+            ));
+        }
+        let clock = identifier(
+            &list[1],
+            GateParseErrorKind::InvalidWaitRising,
+            "wait-rising clock must be a symbol",
+        )?;
+        let count = if let Some(count) = list.get(2) {
+            match count.value {
+                SExpr::Integer(value) if value > 0 => u32::try_from(value).map_err(|_| {
+                    error(
+                        GateParseErrorKind::InvalidWaitRising,
+                        "wait-rising count exceeds u32",
+                        count,
+                    )
+                })?,
+                _ => {
+                    return Err(error(
+                        GateParseErrorKind::InvalidWaitRising,
+                        "wait-rising count must be positive",
+                        count,
+                    ));
+                }
+            }
+        } else {
+            1
+        };
+        TestbenchStmt::WaitRising { clock, count }
+    } else if is_symbol(list.first(), "assert") {
+        let list = exact_list(
+            expression,
+            3,
+            GateParseErrorKind::InvalidAssert,
+            "assert must have three elements",
+        )?;
+        let message = match &list[2].value {
+            SExpr::String(value) => value.clone(),
+            _ => {
+                return Err(error(
+                    GateParseErrorKind::InvalidAssertMessage,
+                    "assert message must be a string",
+                    &list[2],
+                ));
+            }
+        };
+        TestbenchStmt::Assert {
+            condition: parse_expr(&list[1])?,
+            message,
+        }
+    } else {
+        return Err(error(
+            GateParseErrorKind::UnknownTestbenchItem,
+            "unknown stimulus statement",
+            expression,
+        ));
     };
     Ok(Spanned {
         value,

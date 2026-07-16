@@ -23,7 +23,11 @@ struct Options {
 fn main() -> ExitCode {
     let mut args = env::args_os();
     let program = args.next().unwrap_or_default();
-    let options = match parse_options(args.collect()) {
+    let arguments = args.collect::<Vec<_>>();
+    if arguments.first().is_some_and(|value| value == "test") {
+        return run_tests(&program, &arguments[1..]);
+    }
+    let options = match parse_options(arguments) {
         Ok(options) => options,
         Err(message) => {
             eprintln!("{message}");
@@ -80,6 +84,71 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn run_tests(program: &OsStr, args: &[OsString]) -> ExitCode {
+    let mut input = None;
+    let mut options = gatelisp::SimulationOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        let text = args[index].to_string_lossy();
+        let destination = match text.as_ref() {
+            "--testbench" => Some(0),
+            "--vcd" => Some(1),
+            "--ghdl" => Some(2),
+            "--work-dir" => Some(3),
+            _ if text.starts_with('-') => {
+                eprintln!("unknown test option: {text}");
+                return usage(program);
+            }
+            _ => {
+                if input.replace(PathBuf::from(&args[index])).is_some() {
+                    eprintln!("multiple input files specified");
+                    return usage(program);
+                }
+                None
+            }
+        };
+        if let Some(destination) = destination {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                eprintln!("{text} requires a value");
+                return usage(program);
+            };
+            match destination {
+                0 => options.testbench = Some(value.to_string_lossy().into_owned()),
+                1 => options.vcd_path = Some(PathBuf::from(value)),
+                2 => options.ghdl_path = Some(PathBuf::from(value)),
+                _ => options.work_directory = Some(PathBuf::from(value)),
+            }
+        }
+        index += 1;
+    }
+    let Some(input) = input else {
+        eprintln!("test input file is required");
+        return usage(program);
+    };
+    let source = match fs::read_to_string(&input) {
+        Ok(source) => source,
+        Err(error) => {
+            eprintln!("{}: {error}", input.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    match gatelisp::simulate_source(&source, &options) {
+        Ok(results) => {
+            for result in results {
+                print!("{}", result.stdout);
+                eprint!("{}", result.stderr);
+                println!("testbench passed: {}", result.testbench_name);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("simulation {:?}: {error}", error.stage);
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn parse_options(args: Vec<OsString>) -> Result<Options, String> {
     let mut mode = None;
     let mut input = None;
@@ -132,7 +201,8 @@ fn set_mode(mode: &mut Option<Mode>, value: Mode) -> Result<(), String> {
 
 fn usage(program: &OsStr) -> ExitCode {
     eprintln!(
-        "usage: {} [--sexpr|--ast|--hir|--vhdl] <source-file> [-o <file>]",
+        "usage: {} [--sexpr|--ast|--hir|--vhdl] <source-file> [-o <file>]\n       {} test <source-file> [--testbench <name>] [--vcd <file>] [--ghdl <path>] [--work-dir <dir>]",
+        program.to_string_lossy(),
         program.to_string_lossy()
     );
     ExitCode::FAILURE
