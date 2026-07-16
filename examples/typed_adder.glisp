@@ -1,0 +1,6 @@
+(module typed-adder
+  (ports
+    (a :in (unsigned 8))
+    (y :out (unsigned 8)))
+
+  (assign y (+ a 1)))

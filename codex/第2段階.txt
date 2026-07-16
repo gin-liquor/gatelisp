@@ -1,0 +1,347 @@
+GateLispコンパイラの第2段階として、汎用S式ASTからGateLisp固有ASTへ変換する構文解析層を実装してください。
+作業前に、現在のリポジトリ、AGENTS.md、既存のLexer、S式Parser、テストを確認してください。既存のS式Readerの動作と公開APIは壊さないでください。
+コンパイラの実行ファイル名はglispcです。既存のライセンス設定とライセンスファイルも維持してください。
+コミットとpushは行わず、実装、テスト、動作確認まで行ってください。
+今回の目的
+現在の変換経路は次の状態です。
+GateLisp source
+→ Lexer
+→ S-expression AST
+今回、次の層を追加してください。
+GateLisp source
+→ Lexer
+→ S-expression AST
+→ GateLisp-specific AST
+型検査、名前解決、ハードウェアIR、VHDL生成は今回実装しません。
+対応するGateLisp構文
+最低限、以下に対応してください。
+(module and-gate
+  (ports
+    (a :in bit)
+    (b :in bit)
+    (y :out bit))
+
+  (wire temporary bit)
+
+  (assign temporary (and a b))
+  (assign y temporary))
+レジスタ宣言にも対応してください。
+(reg count (unsigned 8))
+(reg accumulator (signed 16) 0)
+今回対応するモジュール要素は以下です。
+•	ports
+•	wire
+•	reg
+•	assign
+clocked、reset、next、fsm、モジュールインスタンスはまだ実装しないでください。
+トップレベル
+トップレベルにはmoduleフォームのみを許可してください。
+複数モジュールは許可します。
+(module module-a
+  (ports))
+
+(module module-b
+  (ports))
+トップレベルにシンボル、整数、文字列、未知のフォームがある場合はGateLisp構文エラーにしてください。
+module構文
+基本形は次のとおりです。
+(module module-name
+  (ports ...)
+  module-item ...)
+規則：
+•	module直後にはモジュール名のSymbolが必要
+•	モジュール名直後にはportsフォームが必要
+•	portsフォームはちょうど1個
+•	空のportsは許可
+•	portsより後にwire、reg、assignを記述
+•	未知のモジュール要素はエラー
+•	余分な引数もエラー
+•	module名やport名などにKeyword、Integer、String、Listは使用不可
+今回はportsフォームがモジュール名の直後にあることを必須にしてください。
+ポート
+ポート宣言は次の形式です。
+(name :in type)
+(name :out type)
+今回対応する方向：
+•	:in
+•	:out
+:inoutなどはまだ対応しないでください。
+ポート宣言は必ず3要素にしてください。
+型構文
+今回対応する型は以下です。
+bit
+(unsigned 8)
+(signed 16)
+型ASTは概ね次のようにしてください。
+pub enum TypeExpr {
+    Bit,
+    Unsigned(u32),
+    Signed(u32),
+}
+規則：
+•	幅は正の整数
+•	幅0は禁止
+•	負数は禁止
+•	u32に収まらない幅は禁止
+•	(unsigned)や(unsigned 8 9)はエラー
+•	未知の型はエラー
+•	型構文の不正は、該当するS式のSpanを示す
+wire
+形式：
+(wire signal-name type)
+要素数は必ず3個です。
+ASTには信号名、型、宣言全体のSpanを保持してください。
+reg
+以下の両方を許可してください。
+(reg signal-name type)
+(reg signal-name type initial-expression)
+初期値はOption<Expr>として保持してください。
+この初期値がFPGAの電源投入値なのか、リセット値なのかといった意味は今回決定しません。構文として保存するだけにしてください。
+要素数は3個または4個です。
+assign
+形式：
+(assign target expression)
+規則：
+•	要素数は必ず3個
+•	targetはSymbolのみ
+•	expressionは以下の式構文に従う
+式AST
+今回の式は、意味を解釈せず、一般的な式ASTへ変換してください。
+対応する式：
+signal-name
+123
+-45
+(and a b)
+(+ count 1)
+(if select a b)
+概ね次の形を想定しています。
+pub enum Expr {
+    Reference(Identifier),
+    Integer(i64),
+    Call {
+        callee: Identifier,
+        arguments: Vec<Spanned<Expr>>,
+    },
+}
+規則：
+•	Symbol単体はReference
+•	Integer単体はInteger
+•	Listは関数／演算呼び出し
+•	呼び出しの先頭要素はSymbolのみ
+•	空リストを式として使うことは禁止
+•	Keywordを式として使うことは禁止
+•	Stringを式として使うことは禁止
+•	呼び出しの引数は0個でも許可する
+•	演算子名や引数数の検査は後段へ回す
+したがって、以下は構文上は許可してください。
+(foo)
+(custom-operation a b c)
+and、+、ifなどの組み込み演算子判定は今回行わないでください。
+AST設計
+正確な名前は既存コードに合わせて調整して構いませんが、概ね以下の情報を持たせてください。
+pub struct Program {
+    pub modules: Vec<Spanned<ModuleDecl>>,
+}
+
+pub struct ModuleDecl {
+    pub name: Identifier,
+    pub ports: Vec<Spanned<PortDecl>>,
+    pub items: Vec<Spanned<ModuleItem>>,
+}
+
+pub struct Identifier {
+    pub name: String,
+    pub span: Span,
+}
+
+pub struct PortDecl {
+    pub name: Identifier,
+    pub direction: PortDirection,
+    pub ty: Spanned<TypeExpr>,
+}
+
+pub enum PortDirection {
+    Input,
+    Output,
+}
+
+pub enum ModuleItem {
+    Wire(WireDecl),
+    Register(RegisterDecl),
+    Assign(AssignStmt),
+}
+
+pub struct WireDecl {
+    pub name: Identifier,
+    pub ty: Spanned<TypeExpr>,
+}
+
+pub struct RegisterDecl {
+    pub name: Identifier,
+    pub ty: Spanned<TypeExpr>,
+    pub initial: Option<Spanned<Expr>>,
+}
+
+pub struct AssignStmt {
+    pub target: Identifier,
+    pub value: Spanned<Expr>,
+}
+ASTの主要ノードはSpanを保持してください。
+Spanned<T>を外側に使うか、各構造体にSpanを直接持たせるかは、既存設計との一貫性を優先してください。
+ファイル構成
+既存構成を確認した上で、例えば以下を追加してください。
+src/
+├─ ast.rs
+├─ frontend.rs
+└─ gate_parser.rs
+役割：
+•	ast.rs：GateLisp固有AST
+•	gate_parser.rs：SExprからGateLisp ASTへの変換
+•	frontend.rs：ReaderとGateLisp構文解析を接続する公開API
+適切な既存名称があれば合わせて構いません。
+公開API
+S式Readerの既存APIは維持してください。
+さらに、ソースからGateLisp ASTを取得するAPIを公開してください。
+概ね次の形を想定しています。
+pub fn parse_program(source: &str) -> Result<Program, FrontendError>;
+また、テストしやすいように、既に解析済みのS式からProgramを構築する関数を分離してください。
+pub fn build_program(
+    expressions: &[Spanned<SExpr>],
+) -> Result<Program, GateParseError>;
+正確な名前は調整可能です。
+ReaderエラーとGateLisp構文エラーは区別できるようにしてください。
+例：
+pub enum FrontendError {
+    Reader(ParseError),
+    GateSyntax(GateParseError),
+}
+エラー
+GateLisp構文エラーには最低限、以下を持たせてください。
+•	エラー種別
+•	人間向けメッセージ
+•	Span
+最低限、以下を検出してください。
+•	トップレベルがmoduleではない
+•	空のトップレベルリスト
+•	module名がない
+•	module名がSymbolではない
+•	portsフォームがない
+•	portsフォームの位置が不正
+•	ポート宣言の要素数が不正
+•	ポート名がSymbolではない
+•	ポート方向が不正
+•	型が不正
+•	ビット幅が0
+•	ビット幅が負
+•	ビット幅がu32範囲外
+•	wireの要素数が不正
+•	regの要素数が不正
+•	assignの要素数が不正
+•	assign先がSymbolではない
+•	未知のモジュール要素
+•	空リストを式として使用
+•	呼び出し先がSymbolではない
+•	KeywordまたはStringを式として使用
+同名ポート、同名信号、未宣言信号、複数ドライバなどは今回検査しないでください。
+エラー処理にpanicを使わず、Resultを返してください。
+CLI
+glispcは通常実行時にGateLisp固有ASTを整形して表示するように変更してください。
+cargo run --bin glispc -- examples/and_gate.glisp
+Readerのデバッグも残せるなら、以下のオプションを追加してください。
+cargo run --bin glispc -- --sexpr examples/and_gate.glisp
+ただし、このオプション追加のためだけに大きなCLI依存ライブラリを追加する必要はありません。標準ライブラリで簡潔に実装してください。
+エラー時は、既存CLIと同様にファイル名、行、桁、メッセージを標準エラー出力へ表示し、非ゼロ終了してください。
+サンプル
+既存のサンプルを.glispへ統一してください。
+examples/and_gate.glisp：
+(module and-gate
+  (ports
+    (a :in bit)
+    (b :in bit)
+    (y :out bit))
+
+  (assign y (and a b)))
+さらにexamples/declarations.glispを追加してください。
+(module declarations
+  (ports
+    (clk   :in bit)
+    (input :in (unsigned 8))
+    (value :out (unsigned 8)))
+
+  (wire incremented (unsigned 8))
+  (reg count (unsigned 8) 0)
+
+  (assign incremented (+ input 1))
+  (assign value count))
+テスト
+既存Readerテストをすべて維持してください。
+GateLisp AST用テストを新しく追加し、最低限以下を確認してください。
+1.	最小module
+2.	空ports
+3.	and-gate
+4.	複数module
+5.	bit型
+6.	unsigned型
+7.	signed型
+8.	wire宣言
+9.	初期値なしreg
+10.	初期値ありreg
+11.	assign
+12.	ネストした式
+13.	整数式
+14.	0引数の呼び出し
+15.	トップレベルがmodule以外
+16.	module名不足
+17.	module名がSymbol以外
+18.	ports不足
+19.	ports位置不正
+20.	不正なポート宣言
+21.	不正なポート方向
+22.	未知の型
+23.	0ビット幅
+24.	負のビット幅
+25.	u32範囲外のビット幅
+26.	不正なwire
+27.	不正なreg
+28.	不正なassign
+29.	未知のモジュール要素
+30.	空リスト式
+31.	呼び出し先がSymbol以外
+32.	Keywordを式に使用
+33.	Stringを式に使用
+34.	各エラーのSpan
+35.	ReaderエラーとGateLisp構文エラーの区別
+README
+READMEを第2段階の状態へ更新してください。
+以下を記載してください。
+•	汎用S式Readerに加えてGateLisp固有ASTに対応したこと
+•	対応している構文
+•	まだ対応していない機能
+•	glispcの実行方法
+•	.glisp拡張子
+•	ASTから直接VHDLを生成しない設計方針
+実装上の制約
+•	unsafe禁止
+•	ライブラリ内でpanic、unwrap、expectを原則使用しない
+•	新しい外部依存は、明確な必要性がない限り追加しない
+•	既存Readerの公開APIとテストを壊さない
+•	SExprから直接VHDLを生成しない
+•	型検査や名前解決を先取りしない
+•	過度な抽象化より、読みやすくテストしやすい実装を優先する
+完成条件
+実装後、以下を実行してください。
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+cargo run --bin glispc -- examples/and_gate.glisp
+cargo run --bin glispc -- examples/declarations.glisp
+cargo run --bin glispc -- --sexpr examples/and_gate.glisp
+失敗した場合は修正し、すべて成功するところまで進めてください。
+最後に以下を報告してください。
+•	作成・変更したファイル
+•	GateLisp ASTの設計
+•	SExprからGateLisp ASTへの変換方法
+•	エラー設計
+•	実行した検証コマンドと結果
+•	今回意図的に実装しなかった機能
+•	次の名前解決・型検査段階へ進む際の課題

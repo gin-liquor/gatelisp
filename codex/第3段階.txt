@@ -1,0 +1,557 @@
+GateLispコンパイラの第3段階として、名前解決、型検査、Typed HIR生成を実装してください。
+作業開始前に、現在のリポジトリ全体、AGENTS.md、S式Reader、GateLisp固有AST、既存テスト、READMEを確認してください。
+既存のReader APIおよびGateLisp AST Parser APIを維持してください。既存テストを壊さないでください。
+コミットおよびpushは行わず、実装、テスト、動作確認まで行ってください。
+今回の目的
+現在のコンパイラ構成：
+GateLisp source
+→ Lexer
+→ S-expression AST
+→ GateLisp AST
+今回、次を追加します。
+GateLisp source
+→ Lexer
+→ S-expression AST
+→ GateLisp AST
+→ name resolution
+→ type checking
+→ Typed HIR
+今回はVHDL AST、VHDL生成、クロック回路、FSM、モジュールインスタンス、マクロは実装しません。
+基本方針
+GateLisp ASTはソース構文を表します。
+Typed HIRは、以下が確定したハードウェア表現としてください。
+•	すべての信号参照がSignalIdへ解決済み
+•	すべての式の型が確定済み
+•	組み込み演算子がenumへ変換済み
+•	代入先がSignalIdへ解決済み
+•	不正な宣言や式は排除済み
+•	生の文字列名による参照を残さない
+GateLisp ASTから直接VHDLを生成しないでください。
+ハードウェア型
+GateLisp ASTの型から、意味解析用のハードウェア型へ変換してください。
+概ね次の型を想定します。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HardwareType {
+    Bit,
+    Unsigned(u32),
+    Signed(u32),
+}
+必要ならCopyやHashを追加して構いません。
+型の等価性は完全一致としてください。
+以下は異なる型です。
+bit
+(unsigned 1)
+(signed 8)
+(unsigned 8)
+(unsigned 16)
+ID
+名前解決後は文字列名ではなくIDを使用してください。
+概ね次の構造を想定します。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ModuleId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SignalId(pub u32);
+IDの内部型はusizeなどに変更して構いません。
+IDは少なくとも各Program内で安定して一意になるようにしてください。
+Typed HIR
+正確な名称や配置は既存コードへ合わせて構いませんが、概ね次の情報を持たせてください。
+pub struct TypedProgram {
+    pub modules: Vec<TypedModule>,
+}
+
+pub struct TypedModule {
+    pub id: ModuleId,
+    pub name: String,
+    pub name_span: Span,
+    pub signals: Vec<TypedSignal>,
+    pub assignments: Vec<TypedAssign>,
+    pub span: Span,
+}
+
+pub struct TypedSignal {
+    pub id: SignalId,
+    pub name: String,
+    pub kind: SignalKind,
+    pub ty: HardwareType,
+    pub declaration_span: Span,
+}
+
+pub enum SignalKind {
+    Input,
+    Output,
+    Wire,
+    Register {
+        initial: Option<TypedExpr>,
+    },
+}
+
+pub struct TypedAssign {
+    pub target: SignalId,
+    pub value: TypedExpr,
+    pub span: Span,
+}
+
+pub struct TypedExpr {
+    pub kind: TypedExprKind,
+    pub ty: HardwareType,
+    pub span: Span,
+}
+
+pub enum TypedExprKind {
+    Signal(SignalId),
+    Integer(i64),
+    Unary {
+        op: UnaryOp,
+        operand: Box<TypedExpr>,
+    },
+    Binary {
+        op: BinaryOp,
+        left: Box<TypedExpr>,
+        right: Box<TypedExpr>,
+    },
+    If {
+        condition: Box<TypedExpr>,
+        when_true: Box<TypedExpr>,
+        when_false: Box<TypedExpr>,
+    },
+}
+必要に応じて、整数値を型付き定数構造へ分離して構いません。
+Typed HIRでは、組み込み演算子を文字列のまま保持しないでください。
+信号名前空間
+各モジュール内で以下を一つの信号名前空間として扱ってください。
+•	input port
+•	output port
+•	wire
+•	register
+同名宣言は禁止です。
+例：
+(module invalid
+  (ports
+    (value :in bit)
+    (value :out bit)))
+これは重複宣言エラーです。
+以下も重複です。
+(module invalid
+  (ports
+    (value :in bit))
+
+  (wire value bit))
+名前は大文字・小文字を区別してください。
+value
+Value
+は別名です。
+宣言順に依存せず、モジュール内の全宣言を収集してから式を解析してください。
+したがって、宣言より前のassignで後に宣言されるwireを参照しても、名前解決上は許可してください。
+モジュール名
+同一Program内のmodule名重複を検出してください。
+今回はモジュールインスタンスがないため、ModuleIdは割り当てますが、モジュール間参照は実装しません。
+assign規則
+assign先は、存在する信号でなければなりません。
+continuous assignを許可する信号：
+•	output port
+•	wire
+continuous assignを禁止する信号：
+•	input port
+•	register
+例：
+(assign input-port value)
+はエラーです。
+(assign register-name value)
+もエラーです。
+同じoutputまたはwireへ複数のassignがある場合は、複数ドライバエラーにしてください。
+未駆動のoutput、wire、registerは今回はエラーにしないでください。
+信号参照
+式中のSymbolは、同一モジュールの信号として解決してください。
+以下を検出してください。
+•	未宣言信号
+•	宣言名ではあるが信号ではないもの
+•	不正な参照
+現在は定数宣言、関数、ローカル変数がないため、式中のReferenceはすべて信号参照です。
+output portを式から参照することは許可してください。
+registerを式から参照することも許可してください。
+整数リテラル
+整数リテラルはAST段階では型を持たず、意味解析時に周囲の期待型へ適合させてください。
+代入例：
+(reg count (unsigned 8) 0)
+(assign value 255)
+型ごとの適合範囲：
+bit:
+  0 または 1
+
+unsigned N:
+  0 ～ 2^N - 1
+
+signed N:
+  -2^(N-1) ～ 2^(N-1) - 1
+範囲外はエラーです。
+例：
+(reg x bit 2)
+(reg x (unsigned 8) -1)
+(reg x (unsigned 8) 256)
+(reg x (signed 8) 128)
+(reg x (signed 8) -129)
+幅が64以上の場合も、シフト演算によるRust側のoverflowやpanicを起こさないようにしてください。
+現在の整数リテラルがi64であることを踏まえ、i128などを使って安全に判定してください。新しいBigInt依存は追加しないでください。
+暗黙変換
+整数リテラルの期待型への適合を除き、暗黙変換は禁止してください。
+以下は型エラーです。
+bit → unsigned(1)
+unsigned(8) → unsigned(16)
+signed(8) → unsigned(8)
+unsigned(8) → signed(8)
+resize、truncate、as-signed、as-unsignedなどの明示変換は今回はまだ実装しません。
+組み込み演算子
+今回、以下の演算子を意味解析してください。
+単項演算
+(not value)
+notの引数は必ず1個です。
+許可する型：
+•	bit
+•	unsigned N
+•	signed N
+結果型は入力型と同じです。
+ビット論理演算
+(and a b)
+(or a b)
+(xor a b)
+各演算子の引数は必ず2個です。
+左右は完全に同じ型でなければなりません。
+許可する型：
+•	bit
+•	unsigned N
+•	signed N
+結果型は入力型と同じです。
+ここではベクタに対してはビット単位演算として扱います。
+算術演算
+(+ a b)
+(- a b)
+各演算子の引数は必ず2個です。
+許可する型：
+•	unsigned N
+•	signed N
+左右は完全に同じ型でなければなりません。
+結果型は入力型と同じ型、同じ幅です。
+オーバーフロー時の意味は、固定幅ハードウェア上の折り返しとします。定数畳み込みは今回実装しなくて構いません。
+bitに対する+と-は禁止してください。
+乗算、除算、剰余、シフトは今回は実装しません。
+等値比較
+(= a b)
+(/= a b)
+引数は必ず2個です。
+左右は完全に同じ型でなければなりません。
+bit、unsigned、signedのすべてを許可してください。
+結果型はbitです。
+順序比較
+(< a b)
+(<= a b)
+(> a b)
+(>= a b)
+引数は必ず2個です。
+左右は完全に同じ型でなければなりません。
+unsignedまたはsignedを許可してください。
+bitは禁止してください。
+結果型はbitです。
+if式
+(if condition when-true when-false)
+引数は必ず3個です。
+•	conditionはbit
+•	when-trueとwhen-falseは完全に同じ型
+•	結果型は分岐式の型
+ifは通常の関数呼び出しではなく、Typed HIRでは専用ノードにしてください。
+期待型による推論
+意味解析関数は、必要に応じて期待型を受け取れる設計にしてください。
+概念例：
+fn check_expr(
+    expr: &Spanned<Expr>,
+    expected: Option<&HardwareType>,
+    context: &ModuleContext,
+) -> Result<TypedExpr, SemanticError>;
+具体的なAPIは調整して構いません。
+期待型を与える場所：
+•	assign右辺：代入先の型
+•	register初期値：registerの型
+•	ifの分岐：外側の期待型がある場合、その型
+•	演算子の整数リテラル引数：他方または外側から確定した型
+以下は解析可能にしてください。
+(assign output (+ input 1))
+(assign output (if select 0 input))
+(assign output (if select 0 1))
+最後の例はassign先の型を両方の整数リテラルへ伝播してください。
+以下のように、どこからも型を決定できない式は型推論エラーにしてください。
+(foo 1 2)
+ただしfooは今回未知の演算子エラーになるため、少なくともpanicせず適切なエラーにしてください。
+比較の両辺が整数リテラルのみで、周囲からもオペランド型が分からない場合も、型推論不能エラーにしてください。
+(assign flag (= 1 2))
+assign先のbitは比較結果の型であり、比較オペランドの型には使用しないでください。
+演算子の引数に整数リテラルがある場合
+片方が型付き信号であれば、その型を整数リテラルへ使用してください。
+(+ input 1)
+(+ 1 input)
+(= input 0)
+(< count 10)
+両方が信号なら型の完全一致を確認してください。
+両方が整数リテラルで、外側の期待型を算術演算へ適用できる場合は、その期待型を使用してください。
+(assign output (+ 1 2))
+ここではoutputの型を+のオペランドと結果へ伝播してください。
+比較演算では、結果の期待型bitからオペランド型を推測しないでください。
+未知の呼び出し
+現在は組み込み演算子以外の関数、マクロ、モジュール呼び出しは存在しません。
+したがって、
+(foo a b)
+は未知の演算子エラーにしてください。
+S式ParserおよびGateLisp AST Parserでは任意の呼び出しを受理する既存動作を維持してください。
+未知の呼び出しを拒否するのは意味解析段階だけです。
+演算子enum
+Typed HIRでは演算子をenum化してください。
+概ね次の形です。
+pub enum UnaryOp {
+    Not,
+}
+
+pub enum BinaryOp {
+    And,
+    Or,
+    Xor,
+    Add,
+    Subtract,
+    Equal,
+    NotEqual,
+    LessThan,
+    LessEqual,
+    GreaterThan,
+    GreaterEqual,
+}
+名称はRustとして読みやすい形へ調整して構いません。
+register初期値
+register初期値はregister自身の型を期待型として型検査してください。
+(reg count (unsigned 8) 0)
+初期値なしも許可してください。
+初期値式から信号を参照することは、今回は許可してください。
+初期値がFPGA初期値、リセット値、シミュレーション初期値のどれに相当するかは、今回確定しないでください。
+READMEに「初期値の合成上の意味は未確定」と明記してください。
+エラー設計
+意味解析エラーはReaderエラー、GateLisp構文エラーと区別してください。
+概ね次の構成を想定します。
+pub enum CompileError {
+    Reader(ParseError),
+    GateSyntax(GateParseError),
+    Semantic(SemanticError),
+}
+既存のFrontendErrorを拡張しても構いません。
+SemanticErrorには最低限、以下を持たせてください。
+•	エラー種別
+•	人間向けメッセージ
+•	主Span
+•	必要に応じて関連Span
+重複宣言エラーでは、新しい宣言を主Span、以前の宣言を関連Spanとして保持できる設計が望ましいです。
+最低限、以下のエラーを検出してください。
+•	module名重複
+•	信号名重複
+•	未宣言信号参照
+•	未宣言assign先
+•	inputへのassign
+•	registerへのassign
+•	同一信号への複数assign
+•	未知の演算子
+•	演算子の引数数不正
+•	算術演算にbitを使用
+•	順序比較にbitを使用
+•	左右オペランドの型不一致
+•	assign右辺と代入先の型不一致
+•	if条件がbitでない
+•	if分岐型不一致
+•	整数リテラル範囲外
+•	整数リテラルの型推論不能
+•	必要な期待型が得られない式
+エラー処理にpanic、unwrap、expectを使用しないでください。ただしテストコード内では使用可能です。
+処理順序
+各モジュールは概ね次の順序で解析してください。
+1.	module IDを割り当てる
+2.	module名重複を検査する
+3.	port、wire、registerをすべて収集する
+4.	SignalIdを割り当てる
+5.	信号名重複を検査する
+6.	register初期値を型検査する
+7.	assign先を名前解決する
+8.	assign先の駆動可否を検査する
+9.	複数assignを検査する
+10.	assign右辺を期待型付きで型検査する
+11.	TypedModuleを構築する
+宣言順に式の名前解決結果が変化しないようにしてください。
+ファイル構成
+既存構成を確認した上で、例えば以下を追加してください。
+src/
+├─ hir.rs
+├─ semantic.rs
+├─ symbol.rs
+└─ compile.rs
+推奨する役割：
+•	hir.rs：Typed HIR、ID、演算子、HardwareType
+•	semantic.rs：名前解決と型検査
+•	symbol.rs：モジュール内シンボル表
+•	compile.rs：sourceからTypedProgramまでを接続するAPI
+ただし、小規模な実装に不必要な分割は避けてください。
+公開API
+既存APIを維持した上で、ソースからTyped HIRを生成する公開APIを追加してください。
+概ね次の形です。
+pub fn compile_source(
+    source: &str,
+) -> Result<TypedProgram, CompileError>;
+GateLisp ASTから直接意味解析できる関数も分離してください。
+pub fn analyze_program(
+    program: &Program,
+) -> Result<TypedProgram, SemanticError>;
+正確な名称は既存コードに合わせて調整して構いません。
+CLI
+glispcに以下の表示モードを用意してください。
+--sexpr   S-expression ASTを表示
+--ast     GateLisp ASTを表示
+--hir     Typed HIRを表示
+オプションなしではTyped HIRを表示してください。
+例：
+cargo run --bin glispc -- examples/and_gate.glisp
+cargo run --bin glispc -- --hir examples/and_gate.glisp
+cargo run --bin glispc -- --ast examples/and_gate.glisp
+cargo run --bin glispc -- --sexpr examples/and_gate.glisp
+CLIのためだけに大きな外部依存は追加せず、標準ライブラリで簡潔に実装してください。
+意味解析エラー時は、ファイル名、行、桁、メッセージを標準エラー出力へ表示し、終了コードを非ゼロにしてください。
+関連Spanがある場合は、可能な範囲で以前の宣言位置も表示してください。
+サンプル
+既存サンプルを維持してください。
+型検査を示すサンプルを追加してください。
+examples/typed_logic.glisp：
+(module typed-logic
+  (ports
+    (a      :in bit)
+    (b      :in bit)
+    (select :in bit)
+    (y      :out bit))
+
+  (wire combined bit)
+
+  (assign combined (and a b))
+  (assign y (if select combined (not combined))))
+examples/typed_adder.glisp：
+(module typed-adder
+  (ports
+    (a :in (unsigned 8))
+    (y :out (unsigned 8)))
+
+  (assign y (+ a 1)))
+テスト
+既存ReaderテストとGateLisp ASTテストをすべて維持してください。
+新しい意味解析テストを追加し、最低限以下を確認してください。
+1.	最小moduleのHIR生成
+2.	SignalId割り当て
+3.	ModuleId割り当て
+4.	input/output/wire/registerの変換
+5.	register初期値なし
+6.	register初期値あり
+7.	信号参照のSignalId解決
+8.	assign先のSignalId解決
+9.	bitのand
+10.	unsignedベクタのand
+11.	signedベクタのnot
+12.	unsigned加算
+13.	signed減算
+14.	等値比較
+15.	順序比較
+16.	if式
+17.	ネストした式
+18.	代入先期待型による整数推論
+19.	演算の片側信号による整数推論
+20.	if分岐への期待型伝播
+21.	bitリテラル0
+22.	bitリテラル1
+23.	unsigned最大値
+24.	signed最小値
+25.	signed最大値
+26.	複数module
+27.	module名重複
+28.	port同士の名前重複
+29.	portとwireの名前重複
+30.	wireとregisterの名前重複
+31.	未宣言信号参照
+32.	未宣言assign先
+33.	inputへのassign
+34.	registerへのassign
+35.	同一wireへの複数assign
+36.	同一outputへの複数assign
+37.	未知の演算子
+38.	notの引数数不正
+39.	二項演算の引数数不正
+40.	ifの引数数不正
+41.	bitへの加算
+42.	bitの順序比較
+43.	unsignedとsignedの混在
+44.	異なるビット幅の混在
+45.	assign型不一致
+46.	if条件型不一致
+47.	if分岐型不一致
+48.	bitへ2を代入
+49.	unsignedへ負数を代入
+50.	unsignedの上限超過
+51.	signedの上限超過
+52.	signedの下限超過
+53.	64bit以上の型で範囲検査がpanicしない
+54.	比較の整数同士が推論不能
+55.	エラーSpan
+56.	重複宣言の関連Span
+57.	Reader、GateSyntax、Semanticエラーの区別
+58.	宣言より前の参照が解決できる
+59.	大文字小文字を区別する
+60.	outputを式から参照できる
+61.	registerを式から参照できる
+README
+READMEを第3段階の状態へ更新してください。
+以下を記載してください。
+•	S式Reader
+•	GateLisp固有AST
+•	名前解決
+•	型検査
+•	Typed HIR
+•	現在対応する型
+•	現在対応する演算子
+•	暗黙変換を行わない方針
+•	整数リテラルのみ期待型へ適合すること
+•	+と-が同じ固定幅を返すこと
+•	register初期値の合成上の意味は未確定であること
+•	CLIの--sexpr、--ast、--hir
+•	まだVHDLを生成しないこと
+•	.glisp拡張子
+実装上の制約
+•	unsafe禁止
+•	ライブラリ内部でpanic、unwrap、expectを使用しない
+•	既存公開APIを壊さない
+•	既存テストを削除または弱体化しない
+•	型検査を文字列比較だけの場当たり的実装にしない
+•	Typed HIR内に未解決の信号名を残さない
+•	Typed HIR内に未知の演算子名を残さない
+•	SExprやGateLisp ASTから直接VHDLを生成しない
+•	外部依存は明確な必要性がない限り追加しない
+•	過度な抽象化より読みやすさとテスト容易性を優先する
+完成条件
+実装後、以下を実行してください。
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+cargo run --bin glispc -- examples/and_gate.glisp
+cargo run --bin glispc -- examples/typed_logic.glisp
+cargo run --bin glispc -- examples/typed_adder.glisp
+cargo run --bin glispc -- --hir examples/typed_adder.glisp
+cargo run --bin glispc -- --ast examples/typed_adder.glisp
+cargo run --bin glispc -- --sexpr examples/typed_adder.glisp
+失敗した場合は修正し、すべて成功するところまで進めてください。
+最後に以下を報告してください。
+•	作成・変更したファイル
+•	Typed HIRの設計
+•	SignalIdとModuleIdの割り当て方法
+•	シンボル表の設計
+•	名前解決の処理順序
+•	期待型を使った整数リテラル推論方法
+•	演算子の型規則
+•	エラー設計
+•	実行した検証コマンドと結果
+•	意図的に実装しなかった機能
+•	次のclocked／register更新またはVHDLバックエンドへ進む際の課題
