@@ -228,6 +228,26 @@ chosen to make LSB-oriented hardware fields and generic field sizes explicit.
 Runtime indices, high/low slice syntax, individual bit indexing, shifts, and
 rotates are not implemented.
 
+## Bit-order reversal
+
+`(reverse-bits value)` reverses every bit position of an unsigned or signed
+vector: the input LSB becomes the output MSB and the input MSB becomes the
+output LSB. The width is preserved, including generic WidthExpr values, and the
+result is always `unsigned`; wrap it in `as-signed` when signed interpretation
+is required. `bit` and standalone integer operands are intentionally rejected.
+
+FFT bit-reverse addressing is a typical use: address widths are 8, 10, 11, and
+12 bits for 256, 1024, 2048, and 4096 points respectively. GateLisp requires
+that address width explicitly and does not derive it from the FFT size. The
+generated VHDL uses one architecture-local, unconstrained-vector helper with a
+loop and `'range`, `'length`, `'low`, and `'high` attributes, so source size
+does not grow with vector width. A double reversal restores the original bits.
+
+This operation normally synthesizes mostly as rewired connections, although
+physical placement and routing delay are not guaranteed to be zero. Reordering
+an entire FFT data array still requires separate RAM/addressing logic; FFT
+butterflies and RAM inference are outside the current language scope.
+
 ## Testbenches and simulation
 
 GateLisp sources may contain top-level `testbench` forms alongside modules. A

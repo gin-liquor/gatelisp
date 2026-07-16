@@ -91,6 +91,7 @@ fn architecture(out: &mut String, value: &VhdlArchitecture) {
             VhdlDeclaration::TruncateUnsignedFunction => out.push_str("  function gl_truncate_unsigned(value : unsigned; size : positive) return unsigned is\n  begin\n    return value(value'low + size - 1 downto value'low);\n  end function gl_truncate_unsigned;\n"),
             VhdlDeclaration::TruncateSignedFunction => out.push_str("  function gl_truncate_signed(value : signed; size : positive) return signed is\n  begin\n    return value(value'low + size - 1 downto value'low);\n  end function gl_truncate_signed;\n"),
             VhdlDeclaration::BitToVectorFunction => out.push_str("  function gl_bit_to_slv(value : std_logic) return std_logic_vector is\n  begin\n    return std_logic_vector'(0 => value);\n  end function gl_bit_to_slv;\n"),
+            VhdlDeclaration::ReverseBitsFunction => out.push_str("  function gl_reverse_bits(value : unsigned) return unsigned is\n    variable result : unsigned(value'range);\n  begin\n    for offset in 0 to value'length - 1 loop\n      result(result'low + offset) := value(value'high - offset);\n    end loop;\n    return result;\n  end function gl_reverse_bits;\n"),
             VhdlDeclaration::Constant { name, ty, value } => { let _ = writeln!(out, "  constant {} : {} := {};", name.0, ty, expr(value)); }
         }
     }

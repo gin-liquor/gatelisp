@@ -236,6 +236,9 @@ pub enum TypedExprKind {
     Concat {
         values: Vec<TypedExpr>,
     },
+    ReverseBits {
+        value: Box<TypedExpr>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

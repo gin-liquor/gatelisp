@@ -1,0 +1,4 @@
+(module fft-bit-reverse-address
+  (generics (address-width :positive 10))
+  (ports (address :in (unsigned address-width)) (reversed-address :out (unsigned address-width)))
+  (assign reversed-address (reverse-bits address)))

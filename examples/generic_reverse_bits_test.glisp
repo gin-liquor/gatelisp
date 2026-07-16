@@ -1,0 +1,11 @@
+(module generic-reverse-bits
+  (generics (width :positive 10))
+  (ports (input :in (unsigned width)) (value :out (unsigned width)))
+  (assign value (reverse-bits input)))
+(testbench generic-reverse-bits-test
+  (target generic-reverse-bits (generics (width 10)))
+  (stimulus
+    (drive input 1) (wait 1 ns)
+    (assert (= value 512) "10-bit address 1 must reverse to 512")
+    (drive input 3) (wait 1 ns)
+    (assert (= value 768) "10-bit address 3 must reverse to 768")))

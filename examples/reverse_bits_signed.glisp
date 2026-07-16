@@ -1,0 +1,6 @@
+(module reverse-bits-signed
+  (ports (input :in (signed 8)) (unsigned-value :out (unsigned 8)) (signed-value :out (signed 8)))
+  (wire reversed (unsigned 8))
+  (assign reversed (reverse-bits input))
+  (assign unsigned-value reversed)
+  (assign signed-value (as-signed reversed)))

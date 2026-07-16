@@ -189,6 +189,9 @@ fn lower_module(
     if module_needs_bit_concat(module) {
         declarations.push(VhdlDeclaration::BitToVectorFunction);
     }
+    if module_needs_reverse_bits(module) {
+        declarations.push(VhdlDeclaration::ReverseBitsFunction);
+    }
     let mut statements = Vec::new();
     for (index, assignment) in module.assignments.iter().enumerate() {
         let target = signal_name(&names, assignment.target)?.read.clone();
@@ -444,6 +447,9 @@ fn lower_testbench(
     }
     if testbench_needs_bit_concat(testbench) {
         declarations.push(VhdlDeclaration::BitToVectorFunction);
+    }
+    if testbench_needs_reverse_bits(testbench) {
+        declarations.push(VhdlDeclaration::ReverseBitsFunction);
     }
     let mut names = HashMap::new();
     let mut port_map = Vec::new();
@@ -884,6 +890,38 @@ fn lower_expr(
                 arguments: vec![VhdlExpression::Concatenate(parts)],
             })
         }
+        TypedExprKind::ReverseBits { value } => {
+            let source_width = hardware_width(&value.ty).ok_or_else(|| {
+                VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "reverse-bits source is not a vector",
+                )
+            })?;
+            if !matches!(
+                expr.ty,
+                HardwareType::Unsigned(_) | HardwareType::SymbolicUnsigned(_)
+            ) || hardware_width(&expr.ty) != Some(source_width)
+            {
+                return Err(VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "reverse-bits result type is inconsistent",
+                ));
+            }
+            let mut source = lower_expr(value, context, prelude)?;
+            if matches!(
+                value.ty,
+                HardwareType::Signed(_) | HardwareType::SymbolicSigned(_)
+            ) {
+                source = VhdlExpression::Call {
+                    function: VhdlIdentifier("unsigned".into()),
+                    arguments: vec![source],
+                };
+            }
+            Ok(VhdlExpression::Call {
+                function: VhdlIdentifier("gl_reverse_bits".into()),
+                arguments: vec![source],
+            })
+        }
     }
 }
 
@@ -1019,6 +1057,7 @@ fn expr_truncate_helpers(expr: &TypedExpr, flags: &mut (bool, bool)) {
                 expr_truncate_helpers(value, flags);
             }
         }
+        TypedExprKind::ReverseBits { value } => expr_truncate_helpers(value, flags),
     }
 }
 fn module_truncate_helpers(module: &TypedModule) -> (bool, bool) {
@@ -1072,6 +1111,7 @@ fn expr_has_bit_concat(expr: &TypedExpr) -> bool {
                 || expr_has_bit_concat(when_false)
         }
         TypedExprKind::Signal(_) | TypedExprKind::Integer(_) => false,
+        TypedExprKind::ReverseBits { value } => expr_has_bit_concat(value),
     }
 }
 fn module_needs_bit_concat(module: &TypedModule) -> bool {
@@ -1090,6 +1130,47 @@ fn testbench_needs_bit_concat(testbench: &TypedTestbench) -> bool {
     testbench.statements.iter().any(|s| match s {
         TypedTestbenchStmt::Drive { value, .. } => expr_has_bit_concat(value),
         TypedTestbenchStmt::Assert { condition, .. } => expr_has_bit_concat(condition),
+        _ => false,
+    })
+}
+fn expr_has_reverse_bits(expr: &TypedExpr) -> bool {
+    match &expr.kind {
+        TypedExprKind::ReverseBits { .. } => true,
+        TypedExprKind::Slice { value, .. }
+        | TypedExprKind::Convert { value, .. }
+        | TypedExprKind::Unary { operand: value, .. } => expr_has_reverse_bits(value),
+        TypedExprKind::Binary { left, right, .. } => {
+            expr_has_reverse_bits(left) || expr_has_reverse_bits(right)
+        }
+        TypedExprKind::If {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            expr_has_reverse_bits(condition)
+                || expr_has_reverse_bits(when_true)
+                || expr_has_reverse_bits(when_false)
+        }
+        TypedExprKind::Concat { values } => values.iter().any(expr_has_reverse_bits),
+        TypedExprKind::Signal(_) | TypedExprKind::Integer(_) => false,
+    }
+}
+fn module_needs_reverse_bits(module: &TypedModule) -> bool {
+    module
+        .assignments
+        .iter()
+        .any(|a| expr_has_reverse_bits(&a.value))
+        || module.clocked_blocks.iter().any(|b| {
+            b.updates.iter().any(|u| expr_has_reverse_bits(&u.value))
+                || b.reset
+                    .as_ref()
+                    .is_some_and(|r| r.updates.iter().any(|u| expr_has_reverse_bits(&u.value)))
+        })
+}
+fn testbench_needs_reverse_bits(testbench: &TypedTestbench) -> bool {
+    testbench.statements.iter().any(|s| match s {
+        TypedTestbenchStmt::Drive { value, .. } => expr_has_reverse_bits(value),
+        TypedTestbenchStmt::Assert { condition, .. } => expr_has_reverse_bits(condition),
         _ => false,
     })
 }

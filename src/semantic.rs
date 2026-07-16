@@ -86,6 +86,7 @@ pub enum SemanticErrorKind {
     SliceRangeUnknown,
     InvalidConcatOperand,
     ConcatWidthOverflow,
+    InvalidReverseBitsSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1110,6 +1111,31 @@ fn check_call(
     span: Span,
 ) -> Result<TypedExpr, SemanticError> {
     match name {
+        "reverse-bits" => {
+            require_arity(name, args, 1, span)?;
+            let value = check_expr(&args[0], None, context)?;
+            let (_, width) = vector_parts(&value.ty).ok_or_else(|| {
+                SemanticError::new(
+                    SemanticErrorKind::InvalidReverseBitsSource,
+                    "reverse-bits requires an unsigned or signed vector",
+                    args[0].span,
+                )
+            })?;
+            let ty = unsigned_width_type(width).ok_or_else(|| {
+                SemanticError::new(
+                    SemanticErrorKind::InvalidReverseBitsSource,
+                    "reverse-bits width is unsupported",
+                    span,
+                )
+            })?;
+            Ok(TypedExpr {
+                kind: TypedExprKind::ReverseBits {
+                    value: Box::new(value),
+                },
+                ty,
+                span,
+            })
+        }
         "as-signed" | "as-unsigned" => {
             require_arity(name, args, 1, span)?;
             let value = check_expr(&args[0], None, context)?;
@@ -1534,6 +1560,11 @@ fn type_hint(expr: &Spanned<Expr>, context: &ModuleContext) -> Option<HardwareTy
                 .first()
                 .and_then(|arg| type_hint(arg, context))
                 .and_then(|ty| reinterpret_type(&ty, false)),
+            "reverse-bits" => arguments
+                .first()
+                .and_then(|arg| type_hint(arg, context))
+                .and_then(|ty| operand_width(&ty))
+                .and_then(unsigned_width_type),
             _ => None,
         },
     }

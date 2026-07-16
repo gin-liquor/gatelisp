@@ -1,0 +1,4 @@
+(module generic-reverse-bits
+  (generics (width :positive 10))
+  (ports (input :in (unsigned width)) (value :out (unsigned width)))
+  (assign value (reverse-bits input)))

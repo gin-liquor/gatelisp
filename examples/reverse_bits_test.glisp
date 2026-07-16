@@ -1,0 +1,14 @@
+(module reverse-bits-dut
+  (ports (input :in (unsigned 8)) (reversed :out (unsigned 8)) (restored :out (unsigned 8)))
+  (wire reversed-internal (unsigned 8))
+  (assign reversed-internal (reverse-bits input))
+  (assign reversed reversed-internal)
+  (assign restored (reverse-bits reversed-internal)))
+(testbench reverse-bits-test
+  (target reverse-bits-dut)
+  (stimulus
+    (drive input 22) (wait 1 ns)
+    (assert (= reversed 104) "0x16 reversed must be 0x68")
+    (assert (= restored 22) "double bit reversal must restore input")
+    (drive input 129) (wait 1 ns)
+    (assert (= reversed 129) "0x81 is symmetric under bit reversal")))

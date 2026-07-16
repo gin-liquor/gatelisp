@@ -1,0 +1,3 @@
+(module reverse-bits-example
+  (ports (input :in (unsigned 8)) (value :out (unsigned 8)))
+  (assign value (reverse-bits input)))

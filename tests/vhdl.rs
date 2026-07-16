@@ -92,6 +92,30 @@ fn generated_vhdl_matches_golden_files() {
             "slice_concat_test",
             include_str!("golden/slice_concat_test.expected.vhd"),
         ),
+        (
+            "reverse_bits",
+            include_str!("golden/reverse_bits.expected.vhd"),
+        ),
+        (
+            "reverse_bits_signed",
+            include_str!("golden/reverse_bits_signed.expected.vhd"),
+        ),
+        (
+            "generic_reverse_bits",
+            include_str!("golden/generic_reverse_bits.expected.vhd"),
+        ),
+        (
+            "fft_bit_reverse_address",
+            include_str!("golden/fft_bit_reverse_address.expected.vhd"),
+        ),
+        (
+            "reverse_bits_test",
+            include_str!("golden/reverse_bits_test.expected.vhd"),
+        ),
+        (
+            "generic_reverse_bits_test",
+            include_str!("golden/generic_reverse_bits_test.expected.vhd"),
+        ),
     ] {
         assert_eq!(
             compile_example(name).replace("\r\n", "\n"),
