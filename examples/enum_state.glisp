@@ -1,0 +1,11 @@
+(enum State :width 2 (IDLE 0) (RUN 1) (DONE 2) (FAULT 3))
+(module enum-state
+  (ports (clk :in bit) (state-out :out State) (debug :out (unsigned 2)))
+  (reg state State State.IDLE)
+  (clocked clk
+    (case-do state
+      (State.IDLE (set! state State.RUN))
+      (State.RUN (set! state State.DONE))
+      (else (set! state State.FAULT))))
+  (assign state-out state)
+  (assign debug (enum-to-bits state)))

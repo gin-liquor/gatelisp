@@ -25,6 +25,12 @@ fn parses_ports_and_all_types() {
     assert_eq!(ports[0].value.ty.value, TypeExpr::Bit);
     assert_eq!(ports[1].value.ty.value, TypeExpr::Unsigned(8));
     assert_eq!(ports[2].value.ty.value, TypeExpr::Signed(16));
+    let enum_program =
+        parse_program("(enum E :width 2 (A 0)) (module enum-user (ports (value :out E)))").unwrap();
+    assert!(matches!(
+        enum_program.modules[0].value.ports[0].value.ty.value,
+        TypeExpr::Enum(_)
+    ));
 }
 
 #[test]
@@ -74,7 +80,6 @@ fn rejects_bad_ports_and_types() {
         ("(module m (ports (a :in)))", K::InvalidPort),
         ("(module m (ports (:a :in bit)))", K::InvalidPortName),
         ("(module m (ports (a :inout bit)))", K::InvalidPortDirection),
-        ("(module m (ports (a :in mystery)))", K::InvalidType),
         ("(module m (ports (a :in (unsigned))))", K::InvalidType),
         ("(module m (ports (a :in (unsigned 8 9))))", K::InvalidType),
         ("(module m (ports (a :in (unsigned 0))))", K::ZeroWidth),

@@ -2,8 +2,24 @@ use crate::{Span, Spanned};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
+    pub enums: Vec<Spanned<EnumDecl>>,
     pub modules: Vec<Spanned<ModuleDecl>>,
     pub testbenches: Vec<Spanned<TestbenchDecl>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumDecl {
+    pub name: Identifier,
+    pub width: u32,
+    pub members: Vec<Spanned<EnumMemberDecl>>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumMemberDecl {
+    pub name: Identifier,
+    pub value: u64,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,6 +106,7 @@ pub enum TypeExpr {
     Signed(u32),
     SymbolicUnsigned(Spanned<ConstExprAst>),
     SymbolicSigned(Spanned<ConstExprAst>),
+    Enum(Identifier),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +187,20 @@ pub struct ClockedDecl {
     pub edge: ClockEdgeSyntax,
     pub reset: Option<Spanned<ResetDecl>>,
     pub updates: Vec<Spanned<NextStmt>>,
+    pub case_dos: Vec<Spanned<CaseDoStmt>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaseDoStmt {
+    pub selector: Spanned<Expr>,
+    pub arms: Vec<Spanned<CaseDoArm>>,
+    pub else_body: Option<Vec<Spanned<NextStmt>>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaseDoArm {
+    pub label: Spanned<Expr>,
+    pub body: Vec<Spanned<NextStmt>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +261,17 @@ pub enum Expr {
         source: Box<Spanned<Expr>>,
         index: Spanned<ConstExprAst>,
     },
+    Case {
+        selector: Box<Spanned<Expr>>,
+        arms: Vec<Spanned<CaseExprArm>>,
+        else_expr: Box<Spanned<Expr>>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaseExprArm {
+    pub label: Spanned<Expr>,
+    pub result: Spanned<Expr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

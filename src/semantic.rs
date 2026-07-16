@@ -4,14 +4,15 @@ use std::{
 };
 
 use crate::{
-    BinaryOp, ClockEdge, ClockEdgeSyntax, ClockedBlockId, ClockedDecl, ConstExprAst,
-    ConversionKind, Expr, GenericBinding, GenericId, GenericKind, GenericKindSyntax, HardwareType,
-    InstanceId, ModuleDecl, ModuleId, ModuleItem, NextStmt, PortDirection, Program, SignalId,
-    SignalKind, SimulationTime, Span, Spanned, StaticBitMotionKind, StaticBitMotionSyntaxKind,
-    TestbenchDecl, TestbenchId, TestbenchStmt, TypeExpr, TypedAssign, TypedClockedBlock, TypedExpr,
-    TypedExprKind, TypedGeneric, TypedGenericBinding, TypedInstance, TypedModule, TypedNext,
-    TypedPortConnection, TypedProgram, TypedReset, TypedSignal, TypedTestbench,
-    TypedTestbenchClock, TypedTestbenchStmt, UnaryOp, WidthExpr,
+    BinaryOp, CaseKey, ClockEdge, ClockEdgeSyntax, ClockedBlockId, ClockedDecl, ConstExprAst,
+    ConversionKind, EnumId, EnumMemberId, Expr, GenericBinding, GenericId, GenericKind,
+    GenericKindSyntax, HardwareType, InstanceId, ModuleDecl, ModuleId, ModuleItem, NextStmt,
+    PortDirection, Program, SignalId, SignalKind, SimulationTime, Span, Spanned,
+    StaticBitMotionKind, StaticBitMotionSyntaxKind, TestbenchDecl, TestbenchId, TestbenchStmt,
+    TypeExpr, TypedAssign, TypedCaseDo, TypedCaseDoArm, TypedCaseExprArm, TypedClockedBlock,
+    TypedEnum, TypedEnumMember, TypedExpr, TypedExprKind, TypedGeneric, TypedGenericBinding,
+    TypedInstance, TypedModule, TypedNext, TypedPortConnection, TypedProgram, TypedReset,
+    TypedSignal, TypedTestbench, TypedTestbenchClock, TypedTestbenchStmt, UnaryOp, WidthExpr,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +96,18 @@ pub enum SemanticErrorKind {
     InvalidBitAtSource,
     BitAtIndexOutOfRange,
     BitAtIndexRangeUnknown,
+    InvalidCaseSelector,
+    InvalidCaseLabel,
+    DuplicateCaseLabel,
+    CaseBranchTypeMismatch,
+    DuplicateEnum,
+    UnknownEnum,
+    DuplicateEnumMember,
+    DuplicateEnumValue,
+    InvalidEnumValue,
+    InvalidEnumType,
+    InvalidEnumConversion,
+    EnumTypeMismatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,9 +161,11 @@ struct ModuleContext {
     signals: Vec<SignalInfo>,
     names: HashMap<String, usize>,
     generics: Vec<TypedGeneric>,
+    enums: Vec<TypedEnum>,
 }
 
 pub fn analyze_program(program: &Program) -> Result<TypedProgram, SemanticError> {
+    let enums = collect_enums(&program.enums)?;
     let mut module_names = HashMap::<&str, Span>::new();
     let mut next_signal = 0_u32;
     let mut next_clocked = 0_u32;
@@ -179,6 +194,7 @@ pub fn analyze_program(program: &Program) -> Result<TypedProgram, SemanticError>
             &mut next_signal,
             &mut next_clocked,
             &mut next_generic,
+            &enums,
         )?);
     }
     let mut next_instance = 0_u32;
@@ -229,10 +245,76 @@ pub fn analyze_program(program: &Program) -> Result<TypedProgram, SemanticError>
         testbenches.push(analyze_testbench(testbench, id, module)?);
     }
     Ok(TypedProgram {
+        enums: enums.clone(),
         modules,
         testbenches,
         module_order,
     })
+}
+
+fn collect_enums(source: &[Spanned<crate::EnumDecl>]) -> Result<Vec<TypedEnum>, SemanticError> {
+    let mut names = HashMap::new();
+    let mut result = Vec::new();
+    for (enum_index, declaration) in source.iter().enumerate() {
+        if let Some(previous) = names.insert(
+            declaration.value.name.name.clone(),
+            declaration.value.name.span,
+        ) {
+            return Err(SemanticError::new(
+                SemanticErrorKind::DuplicateEnum,
+                "duplicate enum name",
+                declaration.value.name.span,
+            )
+            .related(previous));
+        }
+        let mut member_names = HashMap::new();
+        let mut values = HashMap::new();
+        let mut members = Vec::new();
+        for (member_index, member) in declaration.value.members.iter().enumerate() {
+            if let Some(previous) =
+                member_names.insert(member.value.name.name.clone(), member.value.name.span)
+            {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::DuplicateEnumMember,
+                    "duplicate enum member name",
+                    member.value.name.span,
+                )
+                .related(previous));
+            }
+            if let Some(previous) = values.insert(member.value.value, member.value.name.span) {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::DuplicateEnumValue,
+                    "duplicate enum member value",
+                    member.value.name.span,
+                )
+                .related(previous));
+            }
+            if declaration.value.width < 64
+                && member.value.value >= (1_u64 << declaration.value.width)
+            {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::InvalidEnumValue,
+                    "enum member value does not fit enum width",
+                    member.span,
+                ));
+            }
+            members.push(TypedEnumMember {
+                id: EnumMemberId(member_index as u32),
+                enum_id: EnumId(enum_index as u32),
+                name: member.value.name.name.clone(),
+                value: member.value.value,
+                span: member.span,
+            });
+        }
+        result.push(TypedEnum {
+            id: EnumId(enum_index as u32),
+            name: declaration.value.name.name.clone(),
+            width: declaration.value.width,
+            members,
+            span: declaration.span,
+        });
+    }
+    Ok(result)
 }
 
 fn resolve_instances(
@@ -528,9 +610,10 @@ fn analyze_module(
     next_id: &mut u32,
     next_clocked_id: &mut u32,
     next_generic_id: &mut u32,
+    enums: &[TypedEnum],
 ) -> Result<TypedModule, SemanticError> {
     let generics = collect_generics(&module.value, next_generic_id)?;
-    let context = collect_signals(&module.value, next_id, &generics)?;
+    let context = collect_signals(&module.value, next_id, &generics, enums)?;
     let mut signals = Vec::with_capacity(context.signals.len());
     for info in &context.signals {
         let kind = match info.class {
@@ -628,6 +711,7 @@ fn analyze_module(
         }
     }
     Ok(TypedModule {
+        enums: enums.to_vec(),
         id,
         name: module.value.name.name.clone(),
         name_span: module.value.name.span,
@@ -655,6 +739,7 @@ fn analyze_testbench(
         signals: Vec::new(),
         names: HashMap::new(),
         generics: Vec::new(),
+        enums: module.enums.clone(),
     };
     for signal in &module.signals {
         let class = match signal.kind {
@@ -826,6 +911,29 @@ fn analyze_clocked(
         }
         updates.push(typed);
     }
+    let mut region_targets = normal_seen.clone();
+    let mut case_dos = Vec::new();
+    for case_do in &clocked.case_dos {
+        let (typed, targets) = analyze_case_do(&case_do.value, case_do.span, context)?;
+        for (target, target_span) in targets {
+            if region_targets.insert(target, target_span).is_some() {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::DuplicateNext,
+                    "register is updated more than once in one clocked region",
+                    target_span,
+                ));
+            }
+            if let Some(previous) = register_drivers.insert(target, target_span) {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::RegisterMultipleClockedDrivers,
+                    "register is driven by multiple clocked blocks",
+                    target_span,
+                )
+                .related(previous));
+            }
+        }
+        case_dos.push(typed);
+    }
     let reset = clocked
         .reset
         .as_ref()
@@ -846,7 +954,7 @@ fn analyze_clocked(
                 .iter()
                 .map(|update| analyze_next(update, context, &mut reset_seen))
                 .collect::<Result<Vec<_>, _>>()?;
-            for target in normal_seen.keys() {
+            for target in region_targets.keys() {
                 if !reset_seen.contains_key(target) {
                     return Err(SemanticError::new(
                         SemanticErrorKind::ResetTargetMissing,
@@ -856,7 +964,7 @@ fn analyze_clocked(
                 }
             }
             for (target, target_span) in &reset_seen {
-                if !normal_seen.contains_key(target) {
+                if !region_targets.contains_key(target) {
                     return Err(SemanticError::new(
                         SemanticErrorKind::ResetTargetExtra,
                         "reset updates a register absent from normal updates",
@@ -881,8 +989,80 @@ fn analyze_clocked(
         },
         reset,
         updates,
+        case_dos,
         span,
     })
+}
+
+fn analyze_case_do(
+    case_do: &crate::CaseDoStmt,
+    span: Span,
+    context: &ModuleContext,
+) -> Result<(TypedCaseDo, HashMap<SignalId, Span>), SemanticError> {
+    let selector = check_expr(&case_do.selector, None, context)?;
+    if selector.ty != HardwareType::Bit
+        && vector_parts(&selector.ty).is_none()
+        && !matches!(selector.ty, HardwareType::Enum(_, _))
+    {
+        return Err(SemanticError::new(
+            SemanticErrorKind::InvalidCaseSelector,
+            "case-do selector must be bit or vector",
+            selector.span,
+        ));
+    }
+    let mut labels = HashMap::new();
+    let mut all_targets = HashMap::new();
+    let mut arms = Vec::new();
+    for arm in &case_do.arms {
+        let key = case_key(&arm.value.label, &selector.ty, context)?;
+        if let Some(previous) = labels.insert(key.value, key.span) {
+            return Err(SemanticError::new(
+                SemanticErrorKind::DuplicateCaseLabel,
+                "duplicate case label",
+                key.span,
+            )
+            .related(previous));
+        }
+        let mut seen = HashMap::new();
+        let body = arm
+            .value
+            .body
+            .iter()
+            .map(|next| analyze_next(next, context, &mut seen))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (target, target_span) in seen {
+            all_targets.entry(target).or_insert(target_span);
+        }
+        arms.push(TypedCaseDoArm {
+            key,
+            body,
+            span: arm.span,
+        });
+    }
+    let else_body = case_do
+        .else_body
+        .as_ref()
+        .map(|body| {
+            let mut seen = HashMap::new();
+            let typed = body
+                .iter()
+                .map(|next| analyze_next(next, context, &mut seen))
+                .collect::<Result<Vec<_>, _>>()?;
+            for (target, target_span) in seen {
+                all_targets.entry(target).or_insert(target_span);
+            }
+            Ok::<_, SemanticError>(typed)
+        })
+        .transpose()?;
+    Ok((
+        TypedCaseDo {
+            selector,
+            arms,
+            else_body,
+            span,
+        },
+        all_targets,
+    ))
 }
 
 fn resolve_control_signal(
@@ -963,11 +1143,13 @@ fn collect_signals(
     module: &ModuleDecl,
     next_id: &mut u32,
     generics: &[TypedGeneric],
+    enums: &[TypedEnum],
 ) -> Result<ModuleContext, SemanticError> {
     let mut context = ModuleContext {
         signals: Vec::new(),
         names: HashMap::new(),
         generics: generics.to_vec(),
+        enums: enums.to_vec(),
     };
     for port in &module.ports {
         let class = match port.value.direction {
@@ -979,7 +1161,7 @@ fn collect_signals(
             next_id,
             &port.value.name.name,
             class,
-            type_from_ast(&port.value.ty.value, generics)?,
+            type_from_ast(&port.value.ty.value, generics, enums)?,
             port.span,
             None,
         )?;
@@ -991,7 +1173,7 @@ fn collect_signals(
                 next_id,
                 &wire.name.name,
                 SignalClass::Wire,
-                type_from_ast(&wire.ty.value, generics)?,
+                type_from_ast(&wire.ty.value, generics, enums)?,
                 item.span,
                 None,
             )?,
@@ -1000,7 +1182,7 @@ fn collect_signals(
                 next_id,
                 &reg.name.name,
                 SignalClass::Register,
-                type_from_ast(&reg.ty.value, generics)?,
+                type_from_ast(&reg.ty.value, generics, enums)?,
                 item.span,
                 reg.initial.clone(),
             )?,
@@ -1054,17 +1236,21 @@ fn check_expr(
 ) -> Result<TypedExpr, SemanticError> {
     let typed = match &expr.value {
         Expr::Reference(identifier) => {
-            let info = lookup(context, &identifier.name).ok_or_else(|| {
-                SemanticError::new(
-                    SemanticErrorKind::UndeclaredSignal,
-                    format!("undeclared signal `{}`", identifier.name),
-                    identifier.span,
-                )
-            })?;
-            TypedExpr {
-                kind: TypedExprKind::Signal(info.id),
-                ty: info.ty.clone(),
-                span: expr.span,
+            if let Some(value) = resolve_enum_member(identifier, context)? {
+                value
+            } else {
+                let info = lookup(context, &identifier.name).ok_or_else(|| {
+                    SemanticError::new(
+                        SemanticErrorKind::UndeclaredSignal,
+                        format!("undeclared signal `{}`", identifier.name),
+                        identifier.span,
+                    )
+                })?;
+                TypedExpr {
+                    kind: TypedExprKind::Signal(info.id),
+                    ty: info.ty.clone(),
+                    span: expr.span,
+                }
             }
         }
         Expr::Integer(value) => {
@@ -1120,6 +1306,11 @@ fn check_expr(
             check_static_bit_motion(kind, value, amount, context, expr.span)?
         }
         Expr::BitAt { source, index } => check_bit_at(source, index, context, expr.span)?,
+        Expr::Case {
+            selector,
+            arms,
+            else_expr,
+        } => check_case_expr(selector, arms, else_expr, expected, context, expr.span)?,
     };
     if let Some(expected) = expected
         && &typed.ty != expected
@@ -1131,6 +1322,42 @@ fn check_expr(
         ));
     }
     Ok(typed)
+}
+
+fn resolve_enum_member(
+    identifier: &crate::Identifier,
+    context: &ModuleContext,
+) -> Result<Option<TypedExpr>, SemanticError> {
+    let Some((enum_name, member_name)) = identifier.name.split_once('.') else {
+        return Ok(None);
+    };
+    let Some(enumeration) = context.enums.iter().find(|item| item.name == enum_name) else {
+        return Err(SemanticError::new(
+            SemanticErrorKind::UnknownEnum,
+            format!("unknown enum `{enum_name}`"),
+            identifier.span,
+        ));
+    };
+    let Some(member) = enumeration
+        .members
+        .iter()
+        .find(|item| item.name == member_name)
+    else {
+        return Err(SemanticError::new(
+            SemanticErrorKind::InvalidEnumType,
+            format!("unknown enum member `{member_name}`"),
+            identifier.span,
+        ));
+    };
+    Ok(Some(TypedExpr {
+        kind: TypedExprKind::EnumValue {
+            enum_id: enumeration.id,
+            member_id: member.id,
+            value: member.value,
+        },
+        ty: HardwareType::Enum(enumeration.id, enumeration.width),
+        span: identifier.span,
+    }))
 }
 
 fn check_static_bit_motion(
@@ -1239,6 +1466,145 @@ fn check_bit_at(
     })
 }
 
+fn case_key(
+    label: &Spanned<Expr>,
+    ty: &HardwareType,
+    context: &ModuleContext,
+) -> Result<CaseKey, SemanticError> {
+    if let HardwareType::Enum(enum_id, _) = ty {
+        let crate::Expr::Reference(identifier) = &label.value else {
+            return Err(SemanticError::new(
+                SemanticErrorKind::InvalidCaseLabel,
+                "enum case label must be an enum member",
+                label.span,
+            ));
+        };
+        let Some(value) = resolve_enum_member(identifier, context)? else {
+            return Err(SemanticError::new(
+                SemanticErrorKind::InvalidCaseLabel,
+                "enum case label must be an enum member",
+                label.span,
+            ));
+        };
+        let TypedExprKind::EnumValue {
+            enum_id: label_enum,
+            member_id,
+            value: encoded,
+        } = value.kind
+        else {
+            return Err(SemanticError::new(
+                SemanticErrorKind::InvalidCaseLabel,
+                "invalid enum case label",
+                label.span,
+            ));
+        };
+        if label_enum != *enum_id {
+            return Err(SemanticError::new(
+                SemanticErrorKind::EnumTypeMismatch,
+                "case label enum type does not match selector",
+                label.span,
+            ));
+        }
+        return Ok(CaseKey {
+            value: encoded as i64,
+            ty: ty.clone(),
+            span: label.span,
+            enum_member: Some(member_id),
+        });
+    }
+    let Expr::Integer(value) = label.value else {
+        return Err(SemanticError::new(
+            SemanticErrorKind::InvalidCaseLabel,
+            "case label must be a static integer",
+            label.span,
+        ));
+    };
+    check_integer(value, ty, &context.generics, label.span)?;
+    Ok(CaseKey {
+        value,
+        ty: ty.clone(),
+        span: label.span,
+        enum_member: None,
+    })
+}
+
+fn check_case_expr(
+    selector: &Spanned<Expr>,
+    arms: &[Spanned<crate::CaseExprArm>],
+    else_expr: &Spanned<Expr>,
+    expected: Option<&HardwareType>,
+    context: &ModuleContext,
+    span: Span,
+) -> Result<TypedExpr, SemanticError> {
+    let selector = check_expr(selector, None, context)?;
+    if selector.ty != HardwareType::Bit
+        && vector_parts(&selector.ty).is_none()
+        && !matches!(selector.ty, HardwareType::Enum(_, _))
+    {
+        return Err(SemanticError::new(
+            SemanticErrorKind::InvalidCaseSelector,
+            "case selector must be bit or vector",
+            selector.span,
+        ));
+    }
+    let hint = arms
+        .iter()
+        .find_map(|arm| type_hint(&arm.value.result, context))
+        .or_else(|| type_hint(else_expr, context))
+        .or_else(|| expected.cloned());
+    let mut labels = HashMap::new();
+    let mut typed_arms = Vec::new();
+    let mut result_type = hint;
+    for arm in arms {
+        let key = case_key(&arm.value.label, &selector.ty, context)?;
+        if let Some(previous) = labels.insert(key.value, key.span) {
+            return Err(SemanticError::new(
+                SemanticErrorKind::DuplicateCaseLabel,
+                "duplicate case label",
+                key.span,
+            )
+            .related(previous));
+        }
+        let result =
+            check_expr(&arm.value.result, result_type.as_ref(), context).map_err(|mut e| {
+                if e.kind == SemanticErrorKind::TypeMismatch {
+                    e.kind = SemanticErrorKind::CaseBranchTypeMismatch;
+                    e.message = "case result branches must have identical types".into();
+                }
+                e
+            })?;
+        result_type.get_or_insert_with(|| result.ty.clone());
+        typed_arms.push(TypedCaseExprArm {
+            key,
+            result,
+            span: arm.span,
+        });
+    }
+    let result_type = result_type.ok_or_else(|| {
+        SemanticError::new(
+            SemanticErrorKind::CannotInferType,
+            "cannot infer case result type",
+            span,
+        )
+    })?;
+    let else_expr = check_expr(else_expr, Some(&result_type), context).map_err(|mut e| {
+        if e.kind == SemanticErrorKind::TypeMismatch {
+            e.kind = SemanticErrorKind::CaseBranchTypeMismatch;
+            e.message = "case result branches must have identical types".into();
+        }
+        e
+    })?;
+    Ok(TypedExpr {
+        kind: TypedExprKind::Case {
+            selector: Box::new(selector),
+            arms: typed_arms,
+            else_expr: Box::new(else_expr),
+        },
+        ty: result_type,
+        span,
+    })
+}
+
 fn check_call(
     name: &str,
     args: &[Spanned<Expr>],
@@ -1247,6 +1613,64 @@ fn check_call(
     span: Span,
 ) -> Result<TypedExpr, SemanticError> {
     match name {
+        "enum-from-bits" => {
+            require_arity(name, args, 2, span)?;
+            let Expr::Reference(identifier) = &args[0].value else {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::InvalidEnumConversion,
+                    "enum-from-bits requires an enum type name",
+                    args[0].span,
+                ));
+            };
+            let enumeration = context
+                .enums
+                .iter()
+                .find(|item| item.name == identifier.name)
+                .ok_or_else(|| {
+                    SemanticError::new(
+                        SemanticErrorKind::UnknownEnum,
+                        "unknown enum type",
+                        identifier.span,
+                    )
+                })?;
+            let value = check_expr(&args[1], None, context)?;
+            if vector_parts(&value.ty)
+                != Some((false, WidthExpr::Constant(u64::from(enumeration.width))))
+            {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::InvalidEnumConversion,
+                    "enum-from-bits requires an exact-width unsigned vector",
+                    args[1].span,
+                ));
+            }
+            Ok(TypedExpr {
+                kind: TypedExprKind::EnumFromBits {
+                    enum_id: enumeration.id,
+                    value: Box::new(value),
+                },
+                ty: HardwareType::Enum(enumeration.id, enumeration.width),
+                span,
+            })
+        }
+        "enum-to-bits" => {
+            require_arity(name, args, 1, span)?;
+            let value = check_expr(&args[0], None, context)?;
+            let HardwareType::Enum(enum_id, width) = value.ty else {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::InvalidEnumConversion,
+                    "enum-to-bits requires an enum value",
+                    args[0].span,
+                ));
+            };
+            Ok(TypedExpr {
+                kind: TypedExprKind::EnumToBits {
+                    enum_id,
+                    value: Box::new(value),
+                },
+                ty: HardwareType::Unsigned(width),
+                span,
+            })
+        }
         "reverse-bits" => {
             require_arity(name, args, 1, span)?;
             let value = check_expr(&args[0], None, context)?;
@@ -1303,6 +1727,13 @@ fn check_call(
         "not" => {
             require_arity(name, args, 1, span)?;
             let operand = check_expr(&args[0], expected, context)?;
+            if matches!(operand.ty, HardwareType::Enum(_, _)) {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::EnumTypeMismatch,
+                    "bitwise not does not accept enum values",
+                    span,
+                ));
+            }
             Ok(TypedExpr {
                 ty: operand.ty.clone(),
                 kind: TypedExprKind::Unary {
@@ -1322,7 +1753,18 @@ fn check_call(
                 _ => BinaryOp::Subtract,
             };
             let (left, right, ty) = check_pair(args, expected, context)?;
-            if matches!(op, BinaryOp::Add | BinaryOp::Subtract) && ty == HardwareType::Bit {
+            if matches!(ty, HardwareType::Enum(_, _))
+                && matches!(op, BinaryOp::And | BinaryOp::Or | BinaryOp::Xor)
+            {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::EnumTypeMismatch,
+                    "bitwise operators do not accept enum values",
+                    span,
+                ));
+            }
+            if matches!(op, BinaryOp::Add | BinaryOp::Subtract)
+                && (ty == HardwareType::Bit || matches!(ty, HardwareType::Enum(_, _)))
+            {
                 return Err(SemanticError::new(
                     SemanticErrorKind::BitArithmetic,
                     "arithmetic operators do not accept bit",
@@ -1342,6 +1784,21 @@ fn check_call(
                 _ => BinaryOp::GreaterEqual,
             };
             let (left, right, operand_ty) = check_pair(args, None, context)?;
+            if matches!(operand_ty, HardwareType::Enum(_, _))
+                && matches!(
+                    op,
+                    BinaryOp::LessThan
+                        | BinaryOp::LessEqual
+                        | BinaryOp::GreaterThan
+                        | BinaryOp::GreaterEqual
+                )
+            {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::EnumTypeMismatch,
+                    "enum ordering comparisons are not supported",
+                    span,
+                ));
+            }
             if matches!(
                 op,
                 BinaryOp::LessThan
@@ -1405,7 +1862,7 @@ fn check_sized_conversion(
     context: &ModuleContext,
     span: Span,
 ) -> Result<TypedExpr, SemanticError> {
-    let target_type = type_from_ast(&target.value, &context.generics)?;
+    let target_type = type_from_ast(&target.value, &context.generics, &context.enums)?;
     let (target_signed, target_width) = vector_parts(&target_type).ok_or_else(|| {
         SemanticError::new(
             SemanticErrorKind::InvalidConversionTarget,
@@ -1602,6 +2059,7 @@ fn vector_parts(ty: &HardwareType) -> Option<(bool, WidthExpr)> {
         HardwareType::SymbolicUnsigned(w) => Some((false, w.clone())),
         HardwareType::SymbolicSigned(w) => Some((true, w.clone())),
         HardwareType::Bit => None,
+        HardwareType::Enum(_, _) => None,
     }
 }
 fn reinterpret_type(ty: &HardwareType, to_signed: bool) -> Option<HardwareType> {
@@ -1685,7 +2143,7 @@ fn type_hint(expr: &Spanned<Expr>, context: &ModuleContext) -> Option<HardwareTy
         }
         Expr::Integer(_) => None,
         Expr::Resize { target, .. } | Expr::Truncate { target, .. } => {
-            type_from_ast(&target.value, &context.generics).ok()
+            type_from_ast(&target.value, &context.generics, &context.enums).ok()
         }
         Expr::Slice { width, .. } => resolve_width(width, &context.generics)
             .ok()
@@ -1693,6 +2151,12 @@ fn type_hint(expr: &Spanned<Expr>, context: &ModuleContext) -> Option<HardwareTy
         Expr::Concat { values } => concat_hint(values, context),
         Expr::StaticBitMotion { value, .. } => type_hint(value, context),
         Expr::BitAt { .. } => Some(HardwareType::Bit),
+        Expr::Case {
+            arms, else_expr, ..
+        } => arms
+            .iter()
+            .find_map(|arm| type_hint(&arm.value.result, context))
+            .or_else(|| type_hint(else_expr, context)),
         Expr::Call { callee, arguments } => match callee.name.as_str() {
             "=" | "/=" | "<" | "<=" | ">" | ">=" => Some(HardwareType::Bit),
             "not" => arguments.first().and_then(|arg| type_hint(arg, context)),
@@ -1740,6 +2204,7 @@ fn check_integer(
         HardwareType::SymbolicSigned(width) => {
             minimum_with_generics(width, generics)? >= signed_bits(value)
         }
+        HardwareType::Enum(_, _) => false,
     };
     if fits {
         Ok(())
@@ -1794,7 +2259,11 @@ fn lookup<'a>(context: &'a ModuleContext, name: &str) -> Option<&'a SignalInfo> 
         .get(name)
         .and_then(|index| context.signals.get(*index))
 }
-fn type_from_ast(ty: &TypeExpr, generics: &[TypedGeneric]) -> Result<HardwareType, SemanticError> {
+fn type_from_ast(
+    ty: &TypeExpr,
+    generics: &[TypedGeneric],
+    enums: &[TypedEnum],
+) -> Result<HardwareType, SemanticError> {
     match ty {
         TypeExpr::Bit => Ok(HardwareType::Bit),
         TypeExpr::Unsigned(width) => Ok(HardwareType::Unsigned(*width)),
@@ -1805,6 +2274,17 @@ fn type_from_ast(ty: &TypeExpr, generics: &[TypedGeneric]) -> Result<HardwareTyp
         TypeExpr::SymbolicSigned(width) => Ok(HardwareType::SymbolicSigned(resolve_width(
             width, generics,
         )?)),
+        TypeExpr::Enum(name) => enums
+            .iter()
+            .find(|item| item.name == name.name)
+            .map(|item| HardwareType::Enum(item.id, item.width))
+            .ok_or_else(|| {
+                SemanticError::new(
+                    SemanticErrorKind::UnknownEnum,
+                    format!("unknown enum `{}`", name.name),
+                    name.span,
+                )
+            }),
     }
 }
 
@@ -2006,6 +2486,7 @@ fn substitute_type(
             }
             v => Ok(HardwareType::SymbolicSigned(v)),
         },
+        HardwareType::Enum(id, width) => Ok(HardwareType::Enum(*id, *width)),
     }
 }
 

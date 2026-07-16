@@ -19,6 +19,12 @@ pub struct InstanceId(pub u32);
 pub struct GenericId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EnumId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EnumMemberId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GenericKind {
     Natural,
     Positive,
@@ -40,13 +46,33 @@ pub enum HardwareType {
     Signed(u32),
     SymbolicUnsigned(WidthExpr),
     SymbolicSigned(WidthExpr),
+    Enum(EnumId, u32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedProgram {
+    pub enums: Vec<TypedEnum>,
     pub modules: Vec<TypedModule>,
     pub testbenches: Vec<TypedTestbench>,
     pub module_order: Vec<ModuleId>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedEnum {
+    pub id: EnumId,
+    pub name: String,
+    pub width: u32,
+    pub members: Vec<TypedEnumMember>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedEnumMember {
+    pub id: EnumMemberId,
+    pub enum_id: EnumId,
+    pub name: String,
+    pub value: u64,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -98,6 +124,7 @@ pub enum TypedTestbenchStmt {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedModule {
+    pub enums: Vec<TypedEnum>,
     pub id: ModuleId,
     pub name: String,
     pub name_span: Span,
@@ -176,7 +203,31 @@ pub struct TypedClockedBlock {
     pub edge: ClockEdge,
     pub reset: Option<TypedReset>,
     pub updates: Vec<TypedNext>,
+    pub case_dos: Vec<TypedCaseDo>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedCaseDo {
+    pub selector: TypedExpr,
+    pub arms: Vec<TypedCaseDoArm>,
+    pub else_body: Option<Vec<TypedNext>>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedCaseDoArm {
+    pub key: CaseKey,
+    pub body: Vec<TypedNext>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseKey {
+    pub value: i64,
+    pub ty: HardwareType,
+    pub span: Span,
+    pub enum_member: Option<EnumMemberId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,6 +301,31 @@ pub enum TypedExprKind {
         source: Box<TypedExpr>,
         index: WidthExpr,
     },
+    EnumValue {
+        enum_id: EnumId,
+        member_id: EnumMemberId,
+        value: u64,
+    },
+    EnumFromBits {
+        enum_id: EnumId,
+        value: Box<TypedExpr>,
+    },
+    EnumToBits {
+        enum_id: EnumId,
+        value: Box<TypedExpr>,
+    },
+    Case {
+        selector: Box<TypedExpr>,
+        arms: Vec<TypedCaseExprArm>,
+        else_expr: Box<TypedExpr>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedCaseExprArm {
+    pub key: CaseKey,
+    pub result: TypedExpr,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

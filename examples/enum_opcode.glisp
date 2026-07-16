@@ -1,0 +1,16 @@
+(enum Opcode :width 5
+  (NOP 0) (WRITE-IMM 1) (TRANSFER 2) (JUMP 3) (JUMP-IF 4))
+
+(module enum-opcode
+  (ports
+    (bits :in (unsigned 5))
+    (opcode :out Opcode)
+    (is-jump :out bit)
+    (is-nop :out bit))
+  (assign opcode (enum-from-bits Opcode bits))
+  (assign is-jump
+    (case opcode
+      (Opcode.JUMP 1)
+      (Opcode.JUMP-IF 1)
+      (else 0)))
+  (assign is-nop (case opcode (Opcode.NOP 1) (else 0))))

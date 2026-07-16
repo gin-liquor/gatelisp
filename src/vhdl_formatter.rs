@@ -93,6 +93,7 @@ fn architecture(out: &mut String, value: &VhdlArchitecture) {
             VhdlDeclaration::BitToVectorFunction => out.push_str("  function gl_bit_to_slv(value : std_logic) return std_logic_vector is\n  begin\n    return std_logic_vector'(0 => value);\n  end function gl_bit_to_slv;\n"),
             VhdlDeclaration::ReverseBitsFunction => out.push_str("  function gl_reverse_bits(value : unsigned) return unsigned is\n    variable result : unsigned(value'range);\n  begin\n    for offset in 0 to value'length - 1 loop\n      result(result'low + offset) := value(value'high - offset);\n    end loop;\n    return result;\n  end function gl_reverse_bits;\n"),
             VhdlDeclaration::BitAtFunction => out.push_str("  function gl_bit_at(value : unsigned; index : natural) return std_logic is\n  begin\n    return value(index);\n  end function gl_bit_at;\n"),
+            VhdlDeclaration::EnumConstant { name, width, value } => out.push_str(&format!("  constant {} : unsigned({} downto 0) := to_unsigned({}, {});\n", name.0, width.saturating_sub(1), value, width)),
             VhdlDeclaration::Constant { name, ty, value } => { let _ = writeln!(out, "  constant {} : {} := {};", name.0, ty, expr(value)); }
         }
     }

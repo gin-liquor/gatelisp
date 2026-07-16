@@ -1,11 +1,11 @@
 use std::fmt;
 
 use crate::{
-    AssignStmt, ClockEdgeSyntax, ClockedDecl, ConstExprAst, Expr, GenericBinding, GenericDecl,
-    GenericKindSyntax, Identifier, InstanceDecl, ModuleDecl, ModuleItem, NextStmt, PortConnection,
-    PortDecl, PortDirection, Program, RegisterDecl, ResetDecl, ResetKind, SExpr, Span, Spanned,
-    StaticBitMotionSyntaxKind, TestbenchClockDecl, TestbenchDecl, TestbenchStmt, TimeLiteral,
-    TimeUnit, TypeExpr, WireDecl,
+    AssignStmt, CaseDoArm, CaseDoStmt, CaseExprArm, ClockEdgeSyntax, ClockedDecl, ConstExprAst,
+    EnumDecl, EnumMemberDecl, Expr, GenericBinding, GenericDecl, GenericKindSyntax, Identifier,
+    InstanceDecl, ModuleDecl, ModuleItem, NextStmt, PortConnection, PortDecl, PortDirection,
+    Program, RegisterDecl, ResetDecl, ResetKind, SExpr, Span, Spanned, StaticBitMotionSyntaxKind,
+    TestbenchClockDecl, TestbenchDecl, TestbenchStmt, TimeLiteral, TimeUnit, TypeExpr, WireDecl,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,12 +105,16 @@ impl fmt::Display for GateParseError {
 impl std::error::Error for GateParseError {}
 
 pub fn build_program(expressions: &[Spanned<SExpr>]) -> Result<Program, GateParseError> {
+    let mut enums = Vec::new();
     let mut modules = Vec::new();
     let mut testbenches = Vec::new();
     for expression in expressions {
         match &expression.value {
             SExpr::List(list) if is_symbol(list.first(), "module") => {
                 modules.push(parse_module(expression)?)
+            }
+            SExpr::List(list) if is_symbol(list.first(), "enum") => {
+                enums.push(parse_enum(expression)?)
             }
             SExpr::List(list) if is_symbol(list.first(), "testbench") => {
                 testbenches.push(parse_testbench(expression)?)
@@ -132,8 +136,104 @@ pub fn build_program(expressions: &[Spanned<SExpr>]) -> Result<Program, GatePars
         }
     }
     Ok(Program {
+        enums,
         modules,
         testbenches,
+    })
+}
+
+fn parse_enum(expression: &Spanned<SExpr>) -> Result<Spanned<EnumDecl>, GateParseError> {
+    let SExpr::List(list) = &expression.value else {
+        return Err(error(
+            GateParseErrorKind::TopLevelNotModule,
+            "invalid enum",
+            expression,
+        ));
+    };
+    if list.len() < 5 {
+        return Err(error(
+            GateParseErrorKind::TopLevelNotModule,
+            "enum requires name, :width, and members",
+            expression,
+        ));
+    }
+    let name = identifier(
+        &list[1],
+        GateParseErrorKind::InvalidModuleName,
+        "enum name must be a symbol",
+    )?;
+    if !matches!(&list[2].value, SExpr::Keyword(value) if value == "width") {
+        return Err(error(
+            GateParseErrorKind::InvalidExpression,
+            "enum requires :width",
+            &list[2],
+        ));
+    }
+    let SExpr::Integer(width) = list[3].value else {
+        return Err(error(
+            GateParseErrorKind::InvalidExpression,
+            "enum width must be a positive integer",
+            &list[3],
+        ));
+    };
+    if width <= 0 || width > i64::from(u32::MAX) {
+        return Err(error(
+            GateParseErrorKind::InvalidExpression,
+            "enum width must be positive",
+            &list[3],
+        ));
+    }
+    let mut members = Vec::new();
+    for item in &list[4..] {
+        let values = exact_list(
+            item,
+            2,
+            GateParseErrorKind::InvalidExpression,
+            "enum member requires name and value",
+        )?;
+        let member_name = identifier(
+            &values[0],
+            GateParseErrorKind::InvalidModuleName,
+            "enum member name must be a symbol",
+        )?;
+        let SExpr::Integer(value) = values[1].value else {
+            return Err(error(
+                GateParseErrorKind::InvalidExpression,
+                "enum member value must be a non-negative integer",
+                &values[1],
+            ));
+        };
+        if value < 0 {
+            return Err(error(
+                GateParseErrorKind::InvalidExpression,
+                "enum member value must be non-negative",
+                &values[1],
+            ));
+        }
+        members.push(Spanned {
+            value: EnumMemberDecl {
+                name: member_name,
+                value: value as u64,
+                span: item.span,
+            },
+            span: item.span,
+        });
+    }
+    if members.is_empty() {
+        return Err(error(
+            GateParseErrorKind::InvalidExpression,
+            "enum requires at least one member",
+            expression,
+        ));
+    }
+    Ok(Spanned {
+        value: EnumDecl {
+            name,
+            width: width as u32,
+            members,
+            span: expression.span,
+        },
+        span: expression.span,
     })
 }
 
@@ -258,6 +358,10 @@ fn parse_port(expression: &Spanned<SExpr>) -> Result<Spanned<PortDecl>, GatePars
 fn parse_type(expression: &Spanned<SExpr>) -> Result<Spanned<TypeExpr>, GateParseError> {
     let value = match &expression.value {
         SExpr::Symbol(name) if name == "bit" => TypeExpr::Bit,
+        SExpr::Symbol(name) => TypeExpr::Enum(Identifier {
+            name: name.clone(),
+            span: expression.span,
+        }),
         SExpr::List(list)
             if list.len() == 2
                 && (is_symbol(list.first(), "unsigned") || is_symbol(list.first(), "signed")) =>
@@ -301,7 +405,7 @@ fn parse_type(expression: &Spanned<SExpr>) -> Result<Spanned<TypeExpr>, GatePars
         _ => {
             return Err(error(
                 GateParseErrorKind::InvalidType,
-                "expected bit, (unsigned width), or (signed width)",
+                "expected bit, enum name, (unsigned width), or (signed width)",
                 expression,
             ));
         }
@@ -659,6 +763,7 @@ fn parse_clocked(expression: &Spanned<SExpr>) -> Result<ClockedDecl, GateParseEr
     }
     let mut reset = None;
     let mut updates = Vec::new();
+    let mut case_dos = Vec::new();
     let mut saw_next = false;
     for item in &list[2..] {
         let item_list = match &item.value {
@@ -696,6 +801,12 @@ fn parse_clocked(expression: &Spanned<SExpr>) -> Result<ClockedDecl, GateParseEr
                 value: parse_next(item)?,
                 span: item.span,
             });
+        } else if is_symbol(item_list.first(), "case-do") {
+            saw_next = true;
+            case_dos.push(Spanned {
+                value: parse_case_do(item)?,
+                span: item.span,
+            });
         } else {
             return Err(error(
                 GateParseErrorKind::UnknownClockedItem,
@@ -704,7 +815,7 @@ fn parse_clocked(expression: &Spanned<SExpr>) -> Result<ClockedDecl, GateParseEr
             ));
         }
     }
-    if updates.is_empty() {
+    if updates.is_empty() && case_dos.is_empty() {
         return Err(error(
             GateParseErrorKind::EmptyClocked,
             "clocked block requires at least one normal next",
@@ -716,6 +827,96 @@ fn parse_clocked(expression: &Spanned<SExpr>) -> Result<ClockedDecl, GateParseEr
         edge,
         reset,
         updates,
+        case_dos,
+    })
+}
+
+fn parse_case_do(expression: &Spanned<SExpr>) -> Result<CaseDoStmt, GateParseError> {
+    let SExpr::List(list) = &expression.value else {
+        return Err(error(
+            GateParseErrorKind::InvalidClocked,
+            "invalid case-do",
+            expression,
+        ));
+    };
+    if list.len() < 3 {
+        return Err(error(
+            GateParseErrorKind::InvalidClocked,
+            "case-do requires selector and arm",
+            expression,
+        ));
+    }
+    let selector = parse_expr(&list[1])?;
+    let mut arms = Vec::new();
+    let mut else_body = None;
+    for (index, arm) in list[2..].iter().enumerate() {
+        let SExpr::List(items) = &arm.value else {
+            return Err(error(
+                GateParseErrorKind::InvalidClocked,
+                "case-do arm must be a list",
+                arm,
+            ));
+        };
+        if items.len() < 2 {
+            return Err(error(
+                GateParseErrorKind::InvalidClocked,
+                "case-do arm body cannot be empty",
+                arm,
+            ));
+        }
+        let body = items[1..]
+            .iter()
+            .map(|statement| {
+                let SExpr::List(parts) = &statement.value else {
+                    return Err(error(
+                        GateParseErrorKind::InvalidNext,
+                        "case-do accepts only next or set!",
+                        statement,
+                    ));
+                };
+                if !is_symbol(parts.first(), "next") && !is_symbol(parts.first(), "set!") {
+                    return Err(error(
+                        GateParseErrorKind::InvalidNext,
+                        "case-do accepts only next or set!",
+                        statement,
+                    ));
+                }
+                Ok(Spanned {
+                    value: parse_next(statement)?,
+                    span: statement.span,
+                })
+            })
+            .collect::<Result<Vec<_>, GateParseError>>()?;
+        if is_symbol(items.first(), "else") {
+            if index + 1 != list.len() - 2 || else_body.is_some() {
+                return Err(error(
+                    GateParseErrorKind::InvalidClocked,
+                    "case-do else must appear once and last",
+                    arm,
+                ));
+            }
+            else_body = Some(body);
+        } else {
+            arms.push(Spanned {
+                value: CaseDoArm {
+                    label: parse_expr(&items[0])?,
+                    body,
+                },
+                span: arm.span,
+            });
+        }
+    }
+    if arms.is_empty() {
+        return Err(error(
+            GateParseErrorKind::InvalidClocked,
+            "case-do requires a labeled arm",
+            expression,
+        ));
+    }
+    Ok(CaseDoStmt {
+        selector,
+        arms,
+        else_body,
     })
 }
 
@@ -962,6 +1163,65 @@ fn parse_expr(expression: &Spanned<SExpr>) -> Result<Spanned<Expr>, GateParseErr
                     value: Expr::BitAt {
                         source: Box::new(parse_expr(&list[1])?),
                         index: parse_bit_index(&list[2])?,
+                    },
+                    span: expression.span,
+                });
+            }
+            if callee.name == "case" {
+                if list.len() < 4 {
+                    return Err(error(
+                        GateParseErrorKind::InvalidExpression,
+                        "case requires selector, arm, and else",
+                        expression,
+                    ));
+                }
+                let selector = Box::new(parse_expr(&list[1])?);
+                let mut arms = Vec::new();
+                let mut else_expr = None;
+                for (index, arm) in list[2..].iter().enumerate() {
+                    let items = exact_list(
+                        arm,
+                        2,
+                        GateParseErrorKind::InvalidExpression,
+                        "case arm must have label and result",
+                    )?;
+                    if is_symbol(items.first(), "else") {
+                        if index + 1 != list.len() - 2 || else_expr.is_some() {
+                            return Err(error(
+                                GateParseErrorKind::InvalidExpression,
+                                "case else must appear once and last",
+                                arm,
+                            ));
+                        }
+                        else_expr = Some(Box::new(parse_expr(&items[1])?));
+                    } else {
+                        arms.push(Spanned {
+                            value: CaseExprArm {
+                                label: parse_expr(&items[0])?,
+                                result: parse_expr(&items[1])?,
+                            },
+                            span: arm.span,
+                        });
+                    }
+                }
+                if arms.is_empty() || else_expr.is_none() {
+                    return Err(error(
+                        GateParseErrorKind::InvalidExpression,
+                        "case requires labeled arms and a final else",
+                        expression,
+                    ));
+                }
+                return Ok(Spanned {
+                    value: Expr::Case {
+                        selector,
+                        arms,
+                        else_expr: else_expr.ok_or_else(|| {
+                            error(
+                                GateParseErrorKind::InvalidExpression,
+                                "case requires else",
+                                expression,
+                            )
+                        })?,
                     },
                     span: expression.span,
                 });

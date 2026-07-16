@@ -151,6 +151,23 @@ fn generated_vhdl_matches_golden_files() {
             "clock_edges",
             include_str!("golden/clock_edges.expected.vhd"),
         ),
+        ("case_expr", include_str!("golden/case_expr.expected.vhd")),
+        ("case_do", include_str!("golden/case_do.expected.vhd")),
+        (
+            "generic_case",
+            include_str!("golden/generic_case.expected.vhd"),
+        ),
+        ("case_fsm", include_str!("golden/case_fsm.expected.vhd")),
+        ("enum_state", include_str!("golden/enum_state.expected.vhd")),
+        (
+            "enum_opcode",
+            include_str!("golden/enum_opcode.expected.vhd"),
+        ),
+        (
+            "enum_conversion",
+            include_str!("golden/enum_conversion.expected.vhd"),
+        ),
+        ("enum_fsm", include_str!("golden/enum_fsm.expected.vhd")),
     ] {
         assert_eq!(
             compile_example(name).replace("\r\n", "\n"),
@@ -256,7 +273,9 @@ fn rejects_nonliteral_initializers_and_invalid_hir() {
         },
     };
     let invalid = TypedProgram {
+        enums: vec![],
         modules: vec![TypedModule {
+            enums: vec![],
             id: ModuleId(0),
             name: "bad".into(),
             name_span: span,
@@ -282,7 +301,9 @@ fn rejects_nonliteral_initializers_and_invalid_hir() {
     );
 
     let missing = TypedProgram {
+        enums: vec![],
         modules: vec![TypedModule {
+            enums: vec![],
             id: ModuleId(0),
             name: "bad".into(),
             name_span: span,

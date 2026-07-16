@@ -1,0 +1,16 @@
+(enum State :width 2 (IDLE 0) (RUN 1) (DONE 2) (FAULT 3))
+
+(module enum-fsm
+  (ports
+    (clk :in bit) (reset :in bit) (start :in bit)
+    (state-out :out State) (debug :out (unsigned 2)))
+  (reg state State State.IDLE)
+  (clocked clk
+    (reset :sync reset (next state State.IDLE))
+    (case-do state
+      (State.IDLE (next state (case start (0 State.IDLE) (1 State.RUN) (else State.IDLE))))
+      (State.RUN (next state State.DONE))
+      (State.DONE (next state State.IDLE))
+      (else (next state State.FAULT))))
+  (assign state-out state)
+  (assign debug (enum-to-bits state)))

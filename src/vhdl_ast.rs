@@ -72,6 +72,11 @@ pub enum VhdlDeclaration {
     BitToVectorFunction,
     ReverseBitsFunction,
     BitAtFunction,
+    EnumConstant {
+        name: VhdlIdentifier,
+        width: u32,
+        value: u64,
+    },
     Constant {
         name: VhdlIdentifier,
         ty: String,

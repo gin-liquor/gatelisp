@@ -1,0 +1,6 @@
+(enum Opcode :width 5 (NOP 0) (WRITE-IMM 1) (TRANSFER 2) (JUMP 3) (JUMP-IF 4))
+(module enum-conversion
+  (ports (bits :in (unsigned 5)) (opcode :out Opcode) (debug :out (unsigned 5)) (low :out bit))
+  (assign opcode (enum-from-bits Opcode bits))
+  (assign debug (enum-to-bits opcode))
+  (assign low (bit-at (enum-to-bits opcode) 0)))

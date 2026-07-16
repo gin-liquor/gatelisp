@@ -21,6 +21,8 @@ GateLispは、Lisp形式でハードウェア回路を記述し、将来的にVH
 * shift／rotateはnumeric_std関数へLoweringし、不要なhelperを生成しない。
 * bit-atは静的indexだけを許可し、generic defaultに頼らずsource幅未満と証明する。
 * clockedの省略edgeはrisingとし、rising/falling混在時は半周期タイミングに注意する。
+* case式とclocked専用case-do文はAST/HIRで分離し、labelはselector型の静的整数として検証する。
+* case-doのarmは排他的なためarm間の同一register更新を別ドライバ扱いしない。
 * 変更後は必ずformat、clippy、testを実行する。
 * テストしやすさと分かりやすさを、過度な抽象化より優先する。
 
@@ -31,6 +33,18 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
+
+## Encoded enum guidance (Stage 10.9)
+
+Enums use a positive fixed integer width and explicit non-negative member
+values. Member references are resolved to `EnumId`/`EnumMemberId`; enum types
+are never implicitly interchangeable with unsigned vectors or other enums.
+Use `enum-from-bits`/`enum-to-bits` for exact-width unsigned conversions.
+Enum values may be used in assignments, equality, `if`, `case`, and `case-do`,
+but not directly in arithmetic, ordering, slicing, concatenation, or bit
+motion. The VHDL backend represents enums as unsigned and validates enum IDs,
+member IDs, encoded values, and widths before emitting architecture-local
+constants. Preserve the existing no-`panic!`/`unwrap`/`expect` policy.
 
 ## Language concepts
 

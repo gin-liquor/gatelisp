@@ -1,0 +1,12 @@
+(module case-do-example
+  (ports (clk :in bit) (selector :in (unsigned 2)) (input :in (unsigned 8))
+    (value :out (unsigned 8)) (busy :out bit))
+  (reg stored (unsigned 8) 0)
+  (reg active bit 0)
+  (clocked clk
+    (case-do selector
+      (0 (set! stored input) (set! active 0))
+      (1 (set! stored (shift-left input 1)) (set! active 1))
+      (else (set! stored 0) (set! active 0))))
+  (assign value stored)
+  (assign busy active))

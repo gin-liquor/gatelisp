@@ -1,0 +1,5 @@
+(module generic-case
+  (generics (width :positive 8))
+  (ports (selector :in bit) (a :in (unsigned width)) (b :in (unsigned width))
+    (value :out (unsigned width)))
+  (assign value (case selector (0 a) (1 b) (else a))))

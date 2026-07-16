@@ -1,0 +1,15 @@
+(module case-fsm
+  (ports (clk :in bit) (reset :in bit) (start :in bit)
+    (state-value :out (unsigned 2)) (busy :out bit) (done :out bit))
+  (reg state (unsigned 2) 0)
+  (reg busy-reg bit 0)
+  (reg done-reg bit 0)
+  (clocked (falling clk)
+    (reset :sync reset (next state 0) (next busy-reg 0) (next done-reg 0))
+    (case-do state
+      (0 (set! state (case start (0 0) (1 1) (else 0))) (set! busy-reg 0) (set! done-reg 0))
+      (1 (set! state 2) (set! busy-reg 1) (set! done-reg 0))
+      (else (set! state 0) (set! busy-reg 0) (set! done-reg 1))))
+  (assign state-value state)
+  (assign busy busy-reg)
+  (assign done done-reg))

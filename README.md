@@ -262,6 +262,22 @@ The traditional `(clocked clk ...)` form remains rising-edge triggered.
 between them can have only half a clock period, so one edge per clock domain is
 normally preferable. Automatic dual-edge or DDR logic is not generated.
 
+## Multi-way selection
+
+`case` is a value-producing expression with one or more statically labeled
+arms and a required final `else`. Labels are range-checked using the selector's
+`bit`, `unsigned`, or `signed` type, and duplicates are rejected after typing.
+All result branches have exactly the same type and width. Case expressions may
+be nested and used inside other expressions.
+
+`case-do` is a clocked-only statement for mutually exclusive register updates.
+Each arm contains one or more `set!` or `next` updates; its `else` is optional,
+and omission means no update for unmatched values. The same register may be
+updated in different arms without creating multiple drivers, while different
+clocked blocks remain separate drivers. Nested `case-do` is not supported in
+this stage. VHDL lowering materializes the selector once and emits a typed
+if/else chain without fallthrough or self-assignments.
+
 ## Bit-order reversal
 
 `(reverse-bits value)` reverses every bit position of an unsigned or signed
@@ -322,3 +338,17 @@ scalar values, and spans are half-open.
 
 FSMs, generics, macros, random stimulus, file I/O, and CDC analysis are not
 implemented. Synchronizers are not inserted automatically.
+
+## Encoded enums (Stage 10.9)
+
+GateLisp supports fixed-width encoded enums such as
+`(enum State :width 2 (IDLE 0) (RUN 1) (DONE 2))`. Widths and member values
+are positive, explicit integer literals checked at compile time. Enum members
+are referenced as `State.IDLE`; enum types remain distinct from unsigned
+vectors even when their widths match.
+
+Use `enum-from-bits` and `enum-to-bits` for explicit exact-width unsigned
+conversions. Enum equality, `if`, `case`, and `case-do` are supported, while
+arithmetic, ordering, and bit-motion operations require an explicit conversion
+to bits. VHDL lowers enum storage to unsigned vectors and emits architecture-
+local constants for the members used by that architecture.

@@ -1,0 +1,9 @@
+(module case-expression
+  (ports
+    (selector :in (unsigned 2))
+    (a :in (unsigned 8)) (b :in (unsigned 8)) (c :in (unsigned 8))
+    (value :out (unsigned 8)) (low :out bit))
+  (assign value
+    (case selector (0 a) (1 b) (2 c) (else 0)))
+  (assign low
+    (bit-at (case selector (0 a) (1 b) (2 c) (else 0)) 0)))
