@@ -1,0 +1,7 @@
+(module and-gate
+  (ports
+    (a :in bit)
+    (b :in bit)
+    (y :out bit))
+
+  (assign y (and a b)))
