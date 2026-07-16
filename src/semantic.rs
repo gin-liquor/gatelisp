@@ -4,9 +4,10 @@ use std::{
 };
 
 use crate::{
-    BinaryOp, Expr, HardwareType, ModuleDecl, ModuleId, ModuleItem, PortDirection, Program,
-    SignalId, SignalKind, Span, Spanned, TypeExpr, TypedAssign, TypedExpr, TypedExprKind,
-    TypedModule, TypedProgram, TypedSignal, UnaryOp,
+    BinaryOp, ClockEdge, ClockedBlockId, ClockedDecl, Expr, HardwareType, ModuleDecl, ModuleId,
+    ModuleItem, NextStmt, PortDirection, Program, SignalId, SignalKind, Span, Spanned, TypeExpr,
+    TypedAssign, TypedClockedBlock, TypedExpr, TypedExprKind, TypedModule, TypedNext, TypedProgram,
+    TypedReset, TypedSignal, UnaryOp,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +30,19 @@ pub enum SemanticErrorKind {
     IntegerOutOfRange,
     CannotInferIntegerType,
     CannotInferType,
+    UndeclaredClock,
+    InvalidClockSource,
+    InvalidClockType,
+    UndeclaredReset,
+    InvalidResetSource,
+    InvalidResetType,
+    UndeclaredNextTarget,
+    NextTargetNotRegister,
+    DuplicateNext,
+    RegisterMultipleClockedDrivers,
+    NextTypeMismatch,
+    ResetTargetMissing,
+    ResetTargetExtra,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +100,7 @@ struct ModuleContext {
 pub fn analyze_program(program: &Program) -> Result<TypedProgram, SemanticError> {
     let mut module_names = HashMap::<&str, Span>::new();
     let mut next_signal = 0_u32;
+    let mut next_clocked = 0_u32;
     let mut modules = Vec::with_capacity(program.modules.len());
     for (index, module) in program.modules.iter().enumerate() {
         if let Some(previous) = module_names.insert(&module.value.name.name, module.value.name.span)
@@ -104,7 +119,12 @@ pub fn analyze_program(program: &Program) -> Result<TypedProgram, SemanticError>
                 module.span,
             )
         })?);
-        modules.push(analyze_module(module, id, &mut next_signal)?);
+        modules.push(analyze_module(
+            module,
+            id,
+            &mut next_signal,
+            &mut next_clocked,
+        )?);
     }
     Ok(TypedProgram { modules })
 }
@@ -113,6 +133,7 @@ fn analyze_module(
     module: &Spanned<ModuleDecl>,
     id: ModuleId,
     next_id: &mut u32,
+    next_clocked_id: &mut u32,
 ) -> Result<TypedModule, SemanticError> {
     let context = collect_signals(&module.value, next_id)?;
     let mut signals = Vec::with_capacity(context.signals.len());
@@ -190,13 +211,195 @@ fn analyze_module(
             });
         }
     }
+    let mut register_drivers = HashMap::new();
+    let mut clocked_blocks = Vec::new();
+    for item in &module.value.items {
+        if let ModuleItem::Clocked(clocked) = &item.value {
+            let block_id = ClockedBlockId(*next_clocked_id);
+            *next_clocked_id = next_clocked_id.checked_add(1).ok_or_else(|| {
+                SemanticError::new(
+                    SemanticErrorKind::CannotInferType,
+                    "too many clocked blocks",
+                    item.span,
+                )
+            })?;
+            clocked_blocks.push(analyze_clocked(
+                clocked,
+                item.span,
+                block_id,
+                &context,
+                &mut register_drivers,
+            )?);
+        }
+    }
     Ok(TypedModule {
         id,
         name: module.value.name.name.clone(),
         name_span: module.value.name.span,
         signals,
         assignments,
+        clocked_blocks,
         span: module.span,
+    })
+}
+
+fn analyze_clocked(
+    clocked: &ClockedDecl,
+    span: Span,
+    id: ClockedBlockId,
+    context: &ModuleContext,
+    register_drivers: &mut HashMap<SignalId, Span>,
+) -> Result<TypedClockedBlock, SemanticError> {
+    let clock = resolve_control_signal(
+        context,
+        &clocked.clock.name,
+        clocked.clock.span,
+        SemanticErrorKind::UndeclaredClock,
+        SemanticErrorKind::InvalidClockSource,
+        SemanticErrorKind::InvalidClockType,
+        "clock",
+    )?;
+    let mut normal_seen = HashMap::new();
+    let mut updates = Vec::new();
+    for update in &clocked.updates {
+        let typed = analyze_next(update, context, &mut normal_seen)?;
+        if let Some(previous) = register_drivers.insert(typed.target, update.span) {
+            return Err(SemanticError::new(
+                SemanticErrorKind::RegisterMultipleClockedDrivers,
+                "register is driven by multiple clocked blocks",
+                update.value.target.span,
+            )
+            .related(previous));
+        }
+        updates.push(typed);
+    }
+    let reset = clocked
+        .reset
+        .as_ref()
+        .map(|reset| {
+            let signal = resolve_control_signal(
+                context,
+                &reset.value.signal.name,
+                reset.value.signal.span,
+                SemanticErrorKind::UndeclaredReset,
+                SemanticErrorKind::InvalidResetSource,
+                SemanticErrorKind::InvalidResetType,
+                "reset",
+            )?;
+            let mut reset_seen = HashMap::new();
+            let reset_updates = reset
+                .value
+                .updates
+                .iter()
+                .map(|update| analyze_next(update, context, &mut reset_seen))
+                .collect::<Result<Vec<_>, _>>()?;
+            for target in normal_seen.keys() {
+                if !reset_seen.contains_key(target) {
+                    return Err(SemanticError::new(
+                        SemanticErrorKind::ResetTargetMissing,
+                        "reset is missing a normally updated register",
+                        reset.span,
+                    ));
+                }
+            }
+            for (target, target_span) in &reset_seen {
+                if !normal_seen.contains_key(target) {
+                    return Err(SemanticError::new(
+                        SemanticErrorKind::ResetTargetExtra,
+                        "reset updates a register absent from normal updates",
+                        *target_span,
+                    ));
+                }
+            }
+            Ok(TypedReset {
+                kind: reset.value.kind,
+                signal,
+                updates: reset_updates,
+                span: reset.span,
+            })
+        })
+        .transpose()?;
+    Ok(TypedClockedBlock {
+        id,
+        clock,
+        edge: ClockEdge::Rising,
+        reset,
+        updates,
+        span,
+    })
+}
+
+fn resolve_control_signal(
+    context: &ModuleContext,
+    name: &str,
+    span: Span,
+    undeclared: SemanticErrorKind,
+    invalid_source: SemanticErrorKind,
+    invalid_type: SemanticErrorKind,
+    role: &str,
+) -> Result<SignalId, SemanticError> {
+    let info = lookup(context, name).ok_or_else(|| {
+        SemanticError::new(
+            undeclared,
+            format!("undeclared {role} signal `{name}`"),
+            span,
+        )
+    })?;
+    if info.class != SignalClass::Input {
+        return Err(SemanticError::new(
+            invalid_source,
+            format!("{role} signal must be an input port"),
+            span,
+        ));
+    }
+    if info.ty != HardwareType::Bit {
+        return Err(SemanticError::new(
+            invalid_type,
+            format!("{role} signal must have type bit"),
+            span,
+        ));
+    }
+    Ok(info.id)
+}
+
+fn analyze_next(
+    update: &Spanned<NextStmt>,
+    context: &ModuleContext,
+    seen: &mut HashMap<SignalId, Span>,
+) -> Result<TypedNext, SemanticError> {
+    let info = lookup(context, &update.value.target.name).ok_or_else(|| {
+        SemanticError::new(
+            SemanticErrorKind::UndeclaredNextTarget,
+            format!("undeclared next target `{}`", update.value.target.name),
+            update.value.target.span,
+        )
+    })?;
+    if info.class != SignalClass::Register {
+        return Err(SemanticError::new(
+            SemanticErrorKind::NextTargetNotRegister,
+            "next target must be a register",
+            update.value.target.span,
+        ));
+    }
+    if let Some(previous) = seen.insert(info.id, update.span) {
+        return Err(SemanticError::new(
+            SemanticErrorKind::DuplicateNext,
+            "register is updated more than once in this block",
+            update.value.target.span,
+        )
+        .related(previous));
+    }
+    let value = check_expr(&update.value.value, Some(&info.ty), context).map_err(|mut error| {
+        if error.kind == SemanticErrorKind::TypeMismatch && error.span == update.value.value.span {
+            error.kind = SemanticErrorKind::NextTypeMismatch;
+            error.message = "next value type does not match register".into();
+        }
+        error
+    })?;
+    Ok(TypedNext {
+        target: info.id,
+        value,
+        span: update.span,
     })
 }
 
@@ -240,7 +443,7 @@ fn collect_signals(module: &ModuleDecl, next_id: &mut u32) -> Result<ModuleConte
                 item.span,
                 reg.initial.clone(),
             )?,
-            ModuleItem::Assign(_) => {}
+            ModuleItem::Assign(_) | ModuleItem::Clocked(_) => {}
         }
     }
     Ok(context)

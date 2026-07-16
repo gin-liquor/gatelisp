@@ -43,6 +43,7 @@ pub enum ModuleItem {
     Wire(WireDecl),
     Register(RegisterDecl),
     Assign(AssignStmt),
+    Clocked(ClockedDecl),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +61,32 @@ pub struct RegisterDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AssignStmt {
+    pub target: Identifier,
+    pub value: Spanned<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClockedDecl {
+    pub clock: Identifier,
+    pub reset: Option<Spanned<ResetDecl>>,
+    pub updates: Vec<Spanned<NextStmt>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResetDecl {
+    pub kind: ResetKind,
+    pub signal: Identifier,
+    pub updates: Vec<Spanned<NextStmt>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetKind {
+    Synchronous,
+    Asynchronous,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NextStmt {
     pub target: Identifier,
     pub value: Spanned<Expr>,
 }

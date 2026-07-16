@@ -1,0 +1,19 @@
+(module counter
+  (ports
+    (clk    :in bit)
+    (rst    :in bit)
+    (enable :in bit)
+    (q      :out (unsigned 8)))
+
+  (reg count (unsigned 8) 0)
+
+  (clocked clk
+    (reset :sync rst
+      (next count 0))
+
+    (next count
+      (if enable
+          (+ count 1)
+          count)))
+
+  (assign q count))

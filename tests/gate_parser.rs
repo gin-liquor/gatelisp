@@ -96,7 +96,7 @@ fn rejects_bad_module_items() {
         ("(module m (ports) (reg x bit 0 1))", K::InvalidRegister),
         ("(module m (ports) (assign x))", K::InvalidAssign),
         ("(module m (ports) (assign :x 1))", K::InvalidAssignTarget),
-        ("(module m (ports) (clocked x))", K::UnknownModuleItem),
+        ("(module m (ports) (mystery x))", K::UnknownModuleItem),
     ] {
         assert_eq!(error(source).kind, kind, "{source}");
     }

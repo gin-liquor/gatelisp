@@ -1,8 +1,9 @@
 use std::fmt;
 
 use crate::{
-    AssignStmt, Expr, Identifier, ModuleDecl, ModuleItem, PortDecl, PortDirection, Program,
-    RegisterDecl, SExpr, Span, Spanned, TypeExpr, WireDecl,
+    AssignStmt, ClockedDecl, Expr, Identifier, ModuleDecl, ModuleItem, NextStmt, PortDecl,
+    PortDirection, Program, RegisterDecl, ResetDecl, ResetKind, SExpr, Span, Spanned, TypeExpr,
+    WireDecl,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +29,19 @@ pub enum GateParseErrorKind {
     EmptyExpression,
     InvalidCallTarget,
     InvalidExpression,
+    InvalidClocked,
+    InvalidClockName,
+    EmptyClocked,
+    UnknownClockedItem,
+    MultipleResets,
+    ResetAfterNext,
+    InvalidResetKind,
+    UnknownResetKind,
+    InvalidResetSignal,
+    EmptyReset,
+    InvalidResetItem,
+    InvalidNext,
+    InvalidNextTarget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,6 +258,7 @@ fn parse_item(expression: &Spanned<SExpr>) -> Result<Spanned<ModuleItem>, GatePa
         "wire" => ModuleItem::Wire(parse_wire(expression)?),
         "reg" => ModuleItem::Register(parse_register(expression)?),
         "assign" => ModuleItem::Assign(parse_assign(expression)?),
+        "clocked" => ModuleItem::Clocked(parse_clocked(expression)?),
         "ports" => {
             return Err(error(
                 GateParseErrorKind::InvalidPortsPosition,
@@ -262,6 +277,201 @@ fn parse_item(expression: &Spanned<SExpr>) -> Result<Spanned<ModuleItem>, GatePa
     Ok(Spanned {
         value,
         span: expression.span,
+    })
+}
+
+fn parse_clocked(expression: &Spanned<SExpr>) -> Result<ClockedDecl, GateParseError> {
+    let list = match &expression.value {
+        SExpr::List(list) if list.len() < 2 => {
+            return Err(error(
+                GateParseErrorKind::InvalidClocked,
+                "clocked form requires a clock signal",
+                expression,
+            ));
+        }
+        SExpr::List(list) => list,
+        _ => {
+            return Err(error(
+                GateParseErrorKind::InvalidClocked,
+                "invalid clocked form",
+                expression,
+            ));
+        }
+    };
+    let clock = identifier(
+        &list[1],
+        GateParseErrorKind::InvalidClockName,
+        "clock name must be a symbol",
+    )?;
+    if list.len() == 2 {
+        return Err(error(
+            GateParseErrorKind::EmptyClocked,
+            "clocked body must contain at least one next",
+            expression,
+        ));
+    }
+    let mut reset = None;
+    let mut updates = Vec::new();
+    let mut saw_next = false;
+    for item in &list[2..] {
+        let item_list = match &item.value {
+            SExpr::List(values) => values,
+            _ => {
+                return Err(error(
+                    GateParseErrorKind::UnknownClockedItem,
+                    "clocked body accepts only reset and next forms",
+                    item,
+                ));
+            }
+        };
+        if is_symbol(item_list.first(), "reset") {
+            if saw_next {
+                return Err(error(
+                    GateParseErrorKind::ResetAfterNext,
+                    "reset must appear before normal next forms",
+                    item,
+                ));
+            }
+            if reset.is_some() {
+                return Err(error(
+                    GateParseErrorKind::MultipleResets,
+                    "clocked block may contain only one reset",
+                    item,
+                ));
+            }
+            reset = Some(Spanned {
+                value: parse_reset(item)?,
+                span: item.span,
+            });
+        } else if is_symbol(item_list.first(), "next") {
+            saw_next = true;
+            updates.push(Spanned {
+                value: parse_next(item)?,
+                span: item.span,
+            });
+        } else {
+            return Err(error(
+                GateParseErrorKind::UnknownClockedItem,
+                "unknown clocked item",
+                item,
+            ));
+        }
+    }
+    if updates.is_empty() {
+        return Err(error(
+            GateParseErrorKind::EmptyClocked,
+            "clocked block requires at least one normal next",
+            expression,
+        ));
+    }
+    Ok(ClockedDecl {
+        clock,
+        reset,
+        updates,
+    })
+}
+
+fn parse_reset(expression: &Spanned<SExpr>) -> Result<ResetDecl, GateParseError> {
+    let list = match &expression.value {
+        SExpr::List(list) => list,
+        _ => {
+            return Err(error(
+                GateParseErrorKind::InvalidResetItem,
+                "invalid reset form",
+                expression,
+            ));
+        }
+    };
+    let kind_expr = list.get(1).ok_or_else(|| {
+        error(
+            GateParseErrorKind::InvalidResetKind,
+            "reset kind is required",
+            expression,
+        )
+    })?;
+    let kind = match &kind_expr.value {
+        SExpr::Keyword(value) if value == "sync" => ResetKind::Synchronous,
+        SExpr::Keyword(value) if value == "async" => ResetKind::Asynchronous,
+        SExpr::Keyword(_) => {
+            return Err(error(
+                GateParseErrorKind::UnknownResetKind,
+                "reset kind must be :sync or :async",
+                kind_expr,
+            ));
+        }
+        _ => {
+            return Err(error(
+                GateParseErrorKind::InvalidResetKind,
+                "reset kind must be a keyword",
+                kind_expr,
+            ));
+        }
+    };
+    let signal_expr = list.get(2).ok_or_else(|| {
+        error(
+            GateParseErrorKind::InvalidResetSignal,
+            "reset signal is required",
+            expression,
+        )
+    })?;
+    let signal = identifier(
+        signal_expr,
+        GateParseErrorKind::InvalidResetSignal,
+        "reset signal must be a symbol",
+    )?;
+    if list.len() == 3 {
+        return Err(error(
+            GateParseErrorKind::EmptyReset,
+            "reset body must contain at least one next",
+            expression,
+        ));
+    }
+    let mut updates = Vec::new();
+    for item in &list[3..] {
+        let values = match &item.value {
+            SExpr::List(values) => values,
+            _ => {
+                return Err(error(
+                    GateParseErrorKind::InvalidResetItem,
+                    "reset body accepts only next forms",
+                    item,
+                ));
+            }
+        };
+        if !is_symbol(values.first(), "next") {
+            return Err(error(
+                GateParseErrorKind::InvalidResetItem,
+                "reset body accepts only next forms",
+                item,
+            ));
+        }
+        updates.push(Spanned {
+            value: parse_next(item)?,
+            span: item.span,
+        });
+    }
+    Ok(ResetDecl {
+        kind,
+        signal,
+        updates,
+    })
+}
+
+fn parse_next(expression: &Spanned<SExpr>) -> Result<NextStmt, GateParseError> {
+    let list = exact_list(
+        expression,
+        3,
+        GateParseErrorKind::InvalidNext,
+        "next form must have three elements",
+    )?;
+    let target = identifier(
+        &list[1],
+        GateParseErrorKind::InvalidNextTarget,
+        "next target must be a symbol",
+    )?;
+    Ok(NextStmt {
+        target,
+        value: parse_expr(&list[2])?,
     })
 }
 

@@ -6,6 +6,9 @@ pub struct ModuleId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SignalId(pub u32);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ClockedBlockId(pub u32);
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum HardwareType {
     Bit,
@@ -25,6 +28,7 @@ pub struct TypedModule {
     pub name_span: Span,
     pub signals: Vec<TypedSignal>,
     pub assignments: Vec<TypedAssign>,
+    pub clocked_blocks: Vec<TypedClockedBlock>,
     pub span: Span,
 }
 
@@ -47,6 +51,36 @@ pub enum SignalKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedAssign {
+    pub target: SignalId,
+    pub value: TypedExpr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedClockedBlock {
+    pub id: ClockedBlockId,
+    pub clock: SignalId,
+    pub edge: ClockEdge,
+    pub reset: Option<TypedReset>,
+    pub updates: Vec<TypedNext>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClockEdge {
+    Rising,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedReset {
+    pub kind: crate::ResetKind,
+    pub signal: SignalId,
+    pub updates: Vec<TypedNext>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedNext {
     pub target: SignalId,
     pub value: TypedExpr,
     pub span: Span,
