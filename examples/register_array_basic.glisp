@@ -1,0 +1,11 @@
+(module register-file
+  (ports
+    (clk :in bit)
+    (read-address :in (unsigned 8))
+    (write-address :in (unsigned 8))
+    (write-data :in (unsigned 8))
+    (read-data :out (unsigned 8)))
+  (register-array registers :address-width 8 :data-width 8 :initial 0)
+  (assign read-data (register-array-read registers read-address))
+  (clocked clk
+    (register-array-write registers write-address write-data)))

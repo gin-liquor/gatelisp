@@ -46,6 +46,30 @@ motion. The VHDL backend represents enums as unsigned and validates enum IDs,
 member IDs, encoded values, and widths before emitting architecture-local
 constants. Preserve the existing no-`panic!`/`unwrap`/`expect` policy.
 
+## Compile-time ROM guidance (Stage 11)
+
+ROM declarations are top-level read-only constants with positive literal
+address/data widths, a required fitting non-negative default, and sparse
+non-negative entries. Duplicate names or addresses and out-of-range values
+must produce span-bearing semantic errors. Sort entries by address before
+lowering. `rom-read` requires an exact-width unsigned address and returns an
+unsigned value of the declared data width; do not add implicit conversions,
+runtime writes, RAM/file initialization, or symbolic widths. VHDL should emit
+an architecture-local array type and constant using `others` for the default,
+with direct asynchronous indexing and no read latency.
+
+## Register-array guidance (Stage 11.5)
+
+Register arrays are module-local fixed-width unsigned storage:
+`register-array name :address-width A :data-width D :initial V`. `initial` is
+a compile-time all-elements elaboration value, not reset behavior or sparse
+initialization. Reads are combinational and require exact-width unsigned
+addresses. Writes are permitted only in clocked blocks, have exact-width
+unsigned address/data, and provide one write port per array. Distinct
+`case-do` arms may write the same array; duplicate writes in one arm/region or
+across clocked drivers are errors. Do not implement reset clearing, array
+ports, sparse initializers, signed/bit/enum arrays, or implicit conversions.
+
 ## Language concepts
 
 GateLispでは、Lispの構文をコンパイル時の回路生成に利用する。

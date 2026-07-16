@@ -94,6 +94,25 @@ fn architecture(out: &mut String, value: &VhdlArchitecture) {
             VhdlDeclaration::ReverseBitsFunction => out.push_str("  function gl_reverse_bits(value : unsigned) return unsigned is\n    variable result : unsigned(value'range);\n  begin\n    for offset in 0 to value'length - 1 loop\n      result(result'low + offset) := value(value'high - offset);\n    end loop;\n    return result;\n  end function gl_reverse_bits;\n"),
             VhdlDeclaration::BitAtFunction => out.push_str("  function gl_bit_at(value : unsigned; index : natural) return std_logic is\n  begin\n    return value(index);\n  end function gl_bit_at;\n"),
             VhdlDeclaration::EnumConstant { name, width, value } => out.push_str(&format!("  constant {} : unsigned({} downto 0) := to_unsigned({}, {});\n", name.0, width.saturating_sub(1), value, width)),
+            VhdlDeclaration::Rom { name, address_width, data_width, depth, default_value, entries } => {
+                let _ = writeln!(out, "  type {}_t is array (", name.0);
+                let _ = writeln!(out, "    0 to {}", depth.saturating_sub(1));
+                let _ = writeln!(out, ") of unsigned({} downto 0);", data_width.saturating_sub(1));
+                let _ = writeln!(out, "  constant {} : {}_t := (", name.0, name.0);
+                for (address, value) in entries {
+                    let _ = writeln!(out, "    {} => {},", address, rom_bits(*value, *data_width));
+                }
+                let _ = writeln!(out, "    others => {}", rom_bits(*default_value, *data_width));
+                out.push_str("  );\n");
+                let _ = address_width;
+            }
+            VhdlDeclaration::RegisterArray { name, address_width, data_width, depth, initial_value } => {
+                let _ = writeln!(out, "  type {}_t is array (", name.0);
+                let _ = writeln!(out, "    0 to {}", depth.saturating_sub(1));
+                let _ = writeln!(out, ") of unsigned({} downto 0);", data_width.saturating_sub(1));
+                let _ = writeln!(out, "  signal {} : {}_t := (others => {});", name.0, name.0, rom_bits(*initial_value, *data_width));
+                let _ = address_width;
+            }
             VhdlDeclaration::Constant { name, ty, value } => { let _ = writeln!(out, "  constant {} : {} := {};", name.0, ty, expr(value)); }
         }
     }
@@ -181,6 +200,19 @@ fn statements(out: &mut String, values: &[VhdlSequentialStatement], level: usize
             VhdlSequentialStatement::SignalAssignment { target, value } => {
                 let _ = writeln!(out, "{pad}{} <= {};", target.0, expr(value));
             }
+            VhdlSequentialStatement::IndexedSignalAssignment {
+                array,
+                index,
+                value,
+            } => {
+                let _ = writeln!(
+                    out,
+                    "{pad}{}(to_integer({})) <= {};",
+                    array.0,
+                    expr(index),
+                    expr(value)
+                );
+            }
             VhdlSequentialStatement::VariableAssignment { target, value } => {
                 let _ = writeln!(out, "{pad}{} := {};", target.0, expr(value));
             }
@@ -258,6 +290,16 @@ fn width_high(value: &VhdlExpression) -> String {
         return width.saturating_sub(1).to_string();
     }
     format!("{} - 1", expr(value))
+}
+
+fn rom_bits(value: u64, width: u32) -> String {
+    if width == 0 {
+        return "\"\"".into();
+    }
+    if width <= 64 {
+        return format!("\"{:0width$b}\"", value, width = width as usize);
+    }
+    format!("\"{:064b}\"", value)
 }
 fn expr(value: &VhdlExpression) -> String {
     match value {

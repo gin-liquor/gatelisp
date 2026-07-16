@@ -3,8 +3,26 @@ use crate::{Span, Spanned};
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub enums: Vec<Spanned<EnumDecl>>,
+    pub roms: Vec<Spanned<RomDecl>>,
     pub modules: Vec<Spanned<ModuleDecl>>,
     pub testbenches: Vec<Spanned<TestbenchDecl>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RomDecl {
+    pub name: Identifier,
+    pub address_width: u32,
+    pub data_width: u32,
+    pub default_value: u64,
+    pub entries: Vec<Spanned<RomEntryDecl>>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RomEntryDecl {
+    pub address: u64,
+    pub value: u64,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -141,6 +159,7 @@ pub struct GenericBinding {
 pub enum ModuleItem {
     Wire(WireDecl),
     Register(RegisterDecl),
+    RegisterArray(RegisterArrayDecl),
     Assign(AssignStmt),
     Clocked(ClockedDecl),
     Instance(InstanceDecl),
@@ -176,6 +195,22 @@ pub struct RegisterDecl {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct RegisterArrayDecl {
+    pub name: Identifier,
+    pub address_width: u32,
+    pub data_width: u32,
+    pub initial_value: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegisterArrayWrite {
+    pub array: Identifier,
+    pub address: Spanned<Expr>,
+    pub value: Spanned<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct AssignStmt {
     pub target: Identifier,
     pub value: Spanned<Expr>,
@@ -188,6 +223,7 @@ pub struct ClockedDecl {
     pub reset: Option<Spanned<ResetDecl>>,
     pub updates: Vec<Spanned<NextStmt>>,
     pub case_dos: Vec<Spanned<CaseDoStmt>>,
+    pub writes: Vec<Spanned<RegisterArrayWrite>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -195,12 +231,14 @@ pub struct CaseDoStmt {
     pub selector: Spanned<Expr>,
     pub arms: Vec<Spanned<CaseDoArm>>,
     pub else_body: Option<Vec<Spanned<NextStmt>>>,
+    pub else_writes: Vec<Spanned<RegisterArrayWrite>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaseDoArm {
     pub label: Spanned<Expr>,
     pub body: Vec<Spanned<NextStmt>>,
+    pub writes: Vec<Spanned<RegisterArrayWrite>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

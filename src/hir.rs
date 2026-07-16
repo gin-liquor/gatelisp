@@ -25,6 +25,12 @@ pub struct EnumId(pub u32);
 pub struct EnumMemberId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RomId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RegisterArrayId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GenericKind {
     Natural,
     Positive,
@@ -52,9 +58,29 @@ pub enum HardwareType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedProgram {
     pub enums: Vec<TypedEnum>,
+    pub roms: Vec<TypedRom>,
     pub modules: Vec<TypedModule>,
     pub testbenches: Vec<TypedTestbench>,
     pub module_order: Vec<ModuleId>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedRom {
+    pub id: RomId,
+    pub name: String,
+    pub address_width: u32,
+    pub data_width: u32,
+    pub depth: u64,
+    pub default_value: u64,
+    pub entries: Vec<TypedRomEntry>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedRomEntry {
+    pub address: u64,
+    pub value: u64,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -125,6 +151,8 @@ pub enum TypedTestbenchStmt {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedModule {
     pub enums: Vec<TypedEnum>,
+    pub roms: Vec<TypedRom>,
+    pub register_arrays: Vec<TypedRegisterArray>,
     pub id: ModuleId,
     pub name: String,
     pub name_span: Span,
@@ -133,6 +161,17 @@ pub struct TypedModule {
     pub assignments: Vec<TypedAssign>,
     pub clocked_blocks: Vec<TypedClockedBlock>,
     pub instances: Vec<TypedInstance>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedRegisterArray {
+    pub id: RegisterArrayId,
+    pub name: String,
+    pub address_width: u32,
+    pub data_width: u32,
+    pub depth: u64,
+    pub initial_value: u64,
     pub span: Span,
 }
 
@@ -204,6 +243,7 @@ pub struct TypedClockedBlock {
     pub reset: Option<TypedReset>,
     pub updates: Vec<TypedNext>,
     pub case_dos: Vec<TypedCaseDo>,
+    pub writes: Vec<TypedRegisterArrayWrite>,
     pub span: Span,
 }
 
@@ -213,12 +253,22 @@ pub struct TypedCaseDo {
     pub arms: Vec<TypedCaseDoArm>,
     pub else_body: Option<Vec<TypedNext>>,
     pub span: Span,
+    pub else_writes: Vec<TypedRegisterArrayWrite>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedCaseDoArm {
     pub key: CaseKey,
     pub body: Vec<TypedNext>,
+    pub span: Span,
+    pub writes: Vec<TypedRegisterArrayWrite>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedRegisterArrayWrite {
+    pub array_id: RegisterArrayId,
+    pub address: TypedExpr,
+    pub value: TypedExpr,
     pub span: Span,
 }
 
@@ -313,6 +363,18 @@ pub enum TypedExprKind {
     EnumToBits {
         enum_id: EnumId,
         value: Box<TypedExpr>,
+    },
+    RomRead {
+        rom_id: RomId,
+        address: Box<TypedExpr>,
+        address_width: u32,
+        data_width: u32,
+    },
+    RegisterArrayRead {
+        array_id: RegisterArrayId,
+        address: Box<TypedExpr>,
+        address_width: u32,
+        data_width: u32,
     },
     Case {
         selector: Box<TypedExpr>,

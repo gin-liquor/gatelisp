@@ -1,0 +1,10 @@
+(rom microcode :address-width 8 :data-width 24 :default 0
+  (0 0) (1 1048577) (2 2097154) (10 16777215))
+
+(module microcode-rom
+  (ports (clk :in bit) (micro-pc :in (unsigned 8))
+    (instruction :out (unsigned 24)))
+  (reg instruction-reg (unsigned 24) 0)
+  (clocked clk
+    (next instruction-reg (rom-read microcode micro-pc)))
+  (assign instruction instruction-reg))

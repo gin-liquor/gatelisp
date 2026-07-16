@@ -1,0 +1,6 @@
+(rom table :address-width 3 :data-width 8 :default 0
+  (0 1) (2 4) (7 255))
+
+(module rom-async
+  (ports (address :in (unsigned 3)) (value :out (unsigned 8)))
+  (assign value (rom-read table address)))

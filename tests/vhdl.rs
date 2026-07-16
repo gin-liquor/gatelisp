@@ -168,6 +168,16 @@ fn generated_vhdl_matches_golden_files() {
             include_str!("golden/enum_conversion.expected.vhd"),
         ),
         ("enum_fsm", include_str!("golden/enum_fsm.expected.vhd")),
+        ("rom_async", include_str!("golden/rom_async.expected.vhd")),
+        ("rom_sync", include_str!("golden/rom_sync.expected.vhd")),
+        (
+            "microcode_rom",
+            include_str!("golden/microcode_rom.expected.vhd"),
+        ),
+        (
+            "enum_opcode_rom",
+            include_str!("golden/enum_opcode_rom.expected.vhd"),
+        ),
     ] {
         assert_eq!(
             compile_example(name).replace("\r\n", "\n"),
@@ -274,8 +284,11 @@ fn rejects_nonliteral_initializers_and_invalid_hir() {
     };
     let invalid = TypedProgram {
         enums: vec![],
+        roms: vec![],
         modules: vec![TypedModule {
             enums: vec![],
+            roms: vec![],
+            register_arrays: vec![],
             id: ModuleId(0),
             name: "bad".into(),
             name_span: span,
@@ -302,8 +315,11 @@ fn rejects_nonliteral_initializers_and_invalid_hir() {
 
     let missing = TypedProgram {
         enums: vec![],
+        roms: vec![],
         modules: vec![TypedModule {
             enums: vec![],
+            roms: vec![],
+            register_arrays: vec![],
             id: ModuleId(0),
             name: "bad".into(),
             name_span: span,

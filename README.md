@@ -352,3 +352,26 @@ conversions. Enum equality, `if`, `case`, and `case-do` are supported, while
 arithmetic, ordering, and bit-motion operations require an explicit conversion
 to bits. VHDL lowers enum storage to unsigned vectors and emits architecture-
 local constants for the members used by that architecture.
+
+## Compile-time ROMs (Stage 11)
+
+Declare a read-only sparse ROM at top level with fixed positive literal widths:
+`(rom table :address-width 8 :data-width 24 :default 0 (0 1) (7 42))`.
+Defaults and entries must be non-negative values that fit the declared data
+width; addresses must be unique and fit the address width. Entries are sorted
+by address for deterministic lowering. `(rom-read table address)` requires an
+exact-width unsigned address and returns an unsigned vector of the ROM data
+width. VHDL emits an architecture-local array constant with sparse assignments
+and an `others` default; reads have no registered latency.
+
+## Register arrays (Stage 11.5)
+
+Module-local register arrays use a fixed unsigned address and data width:
+`(register-array registers :address-width 8 :data-width 8 :initial 0)`.
+`initial` initializes every element at elaboration; it is not a reset or a
+sparse initializer. Reads use `(register-array-read registers address)` and
+are combinational. Writes use `(register-array-write registers address value)`
+only inside a clocked block, with one write port per array and exact-width
+unsigned address/data. Different `case-do` arms may write the same array, but
+conflicting writes in one arm or clocked region are rejected. Reset branches do
+not clear arrays. VHDL lowers each array to an architecture-local array signal.

@@ -4,8 +4,9 @@ use crate::{
     AssignStmt, CaseDoArm, CaseDoStmt, CaseExprArm, ClockEdgeSyntax, ClockedDecl, ConstExprAst,
     EnumDecl, EnumMemberDecl, Expr, GenericBinding, GenericDecl, GenericKindSyntax, Identifier,
     InstanceDecl, ModuleDecl, ModuleItem, NextStmt, PortConnection, PortDecl, PortDirection,
-    Program, RegisterDecl, ResetDecl, ResetKind, SExpr, Span, Spanned, StaticBitMotionSyntaxKind,
-    TestbenchClockDecl, TestbenchDecl, TestbenchStmt, TimeLiteral, TimeUnit, TypeExpr, WireDecl,
+    Program, RegisterArrayDecl, RegisterArrayWrite, RegisterDecl, ResetDecl, ResetKind, RomDecl,
+    RomEntryDecl, SExpr, Span, Spanned, StaticBitMotionSyntaxKind, TestbenchClockDecl,
+    TestbenchDecl, TestbenchStmt, TimeLiteral, TimeUnit, TypeExpr, WireDecl,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +107,7 @@ impl std::error::Error for GateParseError {}
 
 pub fn build_program(expressions: &[Spanned<SExpr>]) -> Result<Program, GateParseError> {
     let mut enums = Vec::new();
+    let mut roms = Vec::new();
     let mut modules = Vec::new();
     let mut testbenches = Vec::new();
     for expression in expressions {
@@ -115,6 +117,9 @@ pub fn build_program(expressions: &[Spanned<SExpr>]) -> Result<Program, GatePars
             }
             SExpr::List(list) if is_symbol(list.first(), "enum") => {
                 enums.push(parse_enum(expression)?)
+            }
+            SExpr::List(list) if is_symbol(list.first(), "rom") => {
+                roms.push(parse_rom(expression)?)
             }
             SExpr::List(list) if is_symbol(list.first(), "testbench") => {
                 testbenches.push(parse_testbench(expression)?)
@@ -137,8 +142,171 @@ pub fn build_program(expressions: &[Spanned<SExpr>]) -> Result<Program, GatePars
     }
     Ok(Program {
         enums,
+        roms,
         modules,
         testbenches,
+    })
+}
+
+fn parse_rom(expression: &Spanned<SExpr>) -> Result<Spanned<RomDecl>, GateParseError> {
+    let SExpr::List(list) = &expression.value else {
+        return Err(error(
+            GateParseErrorKind::InvalidExpression,
+            "invalid rom",
+            expression,
+        ));
+    };
+    if list.len() < 2 {
+        return Err(error(
+            GateParseErrorKind::InvalidExpression,
+            "rom requires a name and options",
+            expression,
+        ));
+    }
+    let name = identifier(
+        &list[1],
+        GateParseErrorKind::InvalidModuleName,
+        "rom name must be a symbol",
+    )?;
+    let mut address_width = None;
+    let mut data_width = None;
+    let mut default_value = None;
+    let mut entries = Vec::new();
+    let mut index = 2;
+    while index < list.len() {
+        if let SExpr::Keyword(keyword) = &list[index].value {
+            let value_expr = list.get(index + 1).ok_or_else(|| {
+                error(
+                    GateParseErrorKind::InvalidExpression,
+                    "rom keyword must be followed by a value",
+                    &list[index],
+                )
+            })?;
+            let SExpr::Integer(value) = value_expr.value else {
+                return Err(error(
+                    GateParseErrorKind::InvalidExpression,
+                    "rom option must be a non-negative integer",
+                    value_expr,
+                ));
+            };
+            if value < 0 {
+                return Err(error(
+                    GateParseErrorKind::InvalidExpression,
+                    "rom option must be non-negative",
+                    value_expr,
+                ));
+            }
+            let slot = match keyword.as_str() {
+                "address-width" => &mut address_width,
+                "data-width" => &mut data_width,
+                "default" => &mut default_value,
+                _ => {
+                    return Err(error(
+                        GateParseErrorKind::InvalidExpression,
+                        "unknown rom keyword",
+                        &list[index],
+                    ));
+                }
+            };
+            if slot.is_some() {
+                return Err(error(
+                    GateParseErrorKind::InvalidExpression,
+                    "duplicate rom keyword",
+                    &list[index],
+                ));
+            }
+            *slot = Some(value as u64);
+            index += 2;
+            continue;
+        }
+        let item = &list[index];
+        let SExpr::List(entry) = &item.value else {
+            return Err(error(
+                GateParseErrorKind::InvalidExpression,
+                "rom entry must be a list",
+                item,
+            ));
+        };
+        if entry.len() != 2 {
+            return Err(error(
+                GateParseErrorKind::InvalidExpression,
+                "rom entry requires address and value",
+                item,
+            ));
+        }
+        let SExpr::Integer(address) = entry[0].value else {
+            return Err(error(
+                GateParseErrorKind::InvalidExpression,
+                "rom address must be a non-negative integer",
+                &entry[0],
+            ));
+        };
+        let SExpr::Integer(value) = entry[1].value else {
+            return Err(error(
+                GateParseErrorKind::InvalidExpression,
+                "rom data must be a non-negative integer",
+                &entry[1],
+            ));
+        };
+        if address < 0 || value < 0 {
+            return Err(error(
+                GateParseErrorKind::InvalidExpression,
+                "rom values must be non-negative",
+                item,
+            ));
+        }
+        entries.push(Spanned {
+            value: RomEntryDecl {
+                address: address as u64,
+                value: value as u64,
+                span: item.span,
+            },
+            span: item.span,
+        });
+        index += 1;
+    }
+    let address_width = address_width.ok_or_else(|| {
+        error(
+            GateParseErrorKind::InvalidExpression,
+            "rom requires :address-width",
+            expression,
+        )
+    })?;
+    let data_width = data_width.ok_or_else(|| {
+        error(
+            GateParseErrorKind::InvalidExpression,
+            "rom requires :data-width",
+            expression,
+        )
+    })?;
+    let default_value = default_value.ok_or_else(|| {
+        error(
+            GateParseErrorKind::InvalidExpression,
+            "rom requires :default",
+            expression,
+        )
+    })?;
+    if address_width == 0
+        || address_width > u64::from(u32::MAX)
+        || data_width == 0
+        || data_width > u64::from(u32::MAX)
+    {
+        return Err(error(
+            GateParseErrorKind::InvalidExpression,
+            "rom widths must be positive",
+            expression,
+        ));
+    }
+    Ok(Spanned {
+        value: RomDecl {
+            name,
+            address_width: address_width as u32,
+            data_width: data_width as u32,
+            default_value,
+            entries,
+            span: expression.span,
+        },
+        span: expression.span,
     })
 }
 
@@ -602,6 +770,7 @@ fn parse_item(expression: &Spanned<SExpr>) -> Result<Spanned<ModuleItem>, GatePa
     let value = match head {
         "wire" => ModuleItem::Wire(parse_wire(expression)?),
         "reg" => ModuleItem::Register(parse_register(expression)?),
+        "register-array" => ModuleItem::RegisterArray(parse_register_array(expression)?),
         "assign" => ModuleItem::Assign(parse_assign(expression)?),
         "clocked" => ModuleItem::Clocked(parse_clocked(expression)?),
         "instance" => ModuleItem::Instance(parse_instance(expression)?),
@@ -764,6 +933,7 @@ fn parse_clocked(expression: &Spanned<SExpr>) -> Result<ClockedDecl, GateParseEr
     let mut reset = None;
     let mut updates = Vec::new();
     let mut case_dos = Vec::new();
+    let mut writes = Vec::new();
     let mut saw_next = false;
     for item in &list[2..] {
         let item_list = match &item.value {
@@ -807,6 +977,12 @@ fn parse_clocked(expression: &Spanned<SExpr>) -> Result<ClockedDecl, GateParseEr
                 value: parse_case_do(item)?,
                 span: item.span,
             });
+        } else if is_symbol(item_list.first(), "register-array-write") {
+            saw_next = true;
+            writes.push(Spanned {
+                value: parse_register_array_write(item)?,
+                span: item.span,
+            });
         } else {
             return Err(error(
                 GateParseErrorKind::UnknownClockedItem,
@@ -815,7 +991,7 @@ fn parse_clocked(expression: &Spanned<SExpr>) -> Result<ClockedDecl, GateParseEr
             ));
         }
     }
-    if updates.is_empty() && case_dos.is_empty() {
+    if updates.is_empty() && case_dos.is_empty() && writes.is_empty() {
         return Err(error(
             GateParseErrorKind::EmptyClocked,
             "clocked block requires at least one normal next",
@@ -828,6 +1004,7 @@ fn parse_clocked(expression: &Spanned<SExpr>) -> Result<ClockedDecl, GateParseEr
         reset,
         updates,
         case_dos,
+        writes,
     })
 }
 
@@ -849,6 +1026,7 @@ fn parse_case_do(expression: &Spanned<SExpr>) -> Result<CaseDoStmt, GateParseErr
     let selector = parse_expr(&list[1])?;
     let mut arms = Vec::new();
     let mut else_body = None;
+    let mut else_writes = Vec::new();
     for (index, arm) in list[2..].iter().enumerate() {
         let SExpr::List(items) = &arm.value else {
             return Err(error(
@@ -864,6 +1042,7 @@ fn parse_case_do(expression: &Spanned<SExpr>) -> Result<CaseDoStmt, GateParseErr
                 arm,
             ));
         }
+        let mut writes = Vec::new();
         let body = items[1..]
             .iter()
             .map(|statement| {
@@ -874,6 +1053,13 @@ fn parse_case_do(expression: &Spanned<SExpr>) -> Result<CaseDoStmt, GateParseErr
                         statement,
                     ));
                 };
+                if is_symbol(parts.first(), "register-array-write") {
+                    writes.push(Spanned {
+                        value: parse_register_array_write(statement)?,
+                        span: statement.span,
+                    });
+                    return Ok(None);
+                }
                 if !is_symbol(parts.first(), "next") && !is_symbol(parts.first(), "set!") {
                     return Err(error(
                         GateParseErrorKind::InvalidNext,
@@ -881,12 +1067,15 @@ fn parse_case_do(expression: &Spanned<SExpr>) -> Result<CaseDoStmt, GateParseErr
                         statement,
                     ));
                 }
-                Ok(Spanned {
+                Ok(Some(Spanned {
                     value: parse_next(statement)?,
                     span: statement.span,
-                })
+                }))
             })
-            .collect::<Result<Vec<_>, GateParseError>>()?;
+            .collect::<Result<Vec<_>, GateParseError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         if is_symbol(items.first(), "else") {
             if index + 1 != list.len() - 2 || else_body.is_some() {
                 return Err(error(
@@ -896,11 +1085,13 @@ fn parse_case_do(expression: &Spanned<SExpr>) -> Result<CaseDoStmt, GateParseErr
                 ));
             }
             else_body = Some(body);
+            else_writes = writes;
         } else {
             arms.push(Spanned {
                 value: CaseDoArm {
                     label: parse_expr(&items[0])?,
                     body,
+                    writes,
                 },
                 span: arm.span,
             });
@@ -917,6 +1108,7 @@ fn parse_case_do(expression: &Spanned<SExpr>) -> Result<CaseDoStmt, GateParseErr
         selector,
         arms,
         else_body,
+        else_writes,
     })
 }
 
@@ -1063,6 +1255,76 @@ fn parse_register(expression: &Spanned<SExpr>) -> Result<RegisterDecl, GateParse
     })
 }
 
+fn parse_register_array(expression: &Spanned<SExpr>) -> Result<RegisterArrayDecl, GateParseError> {
+    let list = match &expression.value {
+        SExpr::List(list) if list.len() == 8 => list,
+        _ => {
+            return Err(error(
+                GateParseErrorKind::InvalidRegister,
+                "register-array requires name, widths, and initial",
+                expression,
+            ));
+        }
+    };
+    let name = identifier(
+        &list[1],
+        GateParseErrorKind::InvalidRegister,
+        "register-array name must be a symbol",
+    )?;
+    let mut values = [None; 3];
+    for (index, keyword) in ["address-width", "data-width", "initial"]
+        .iter()
+        .enumerate()
+    {
+        if !matches!(&list[2 + index * 2].value, SExpr::Keyword(value) if value == keyword) {
+            return Err(error(
+                GateParseErrorKind::InvalidRegister,
+                "invalid register-array keyword",
+                &list[2 + index * 2],
+            ));
+        }
+        let SExpr::Integer(value) = list[3 + index * 2].value else {
+            return Err(error(
+                GateParseErrorKind::InvalidRegister,
+                "register-array option must be a non-negative integer",
+                &list[3 + index * 2],
+            ));
+        };
+        if value < 0 {
+            return Err(error(
+                GateParseErrorKind::InvalidRegister,
+                "register-array option must be non-negative",
+                &list[3 + index * 2],
+            ));
+        }
+        values[index] = Some(value as u64);
+    }
+    let [Some(address_width), Some(data_width), Some(initial_value)] = values else {
+        return Err(error(
+            GateParseErrorKind::InvalidRegister,
+            "register-array options are incomplete",
+            expression,
+        ));
+    };
+    if address_width == 0
+        || address_width > u64::from(u32::MAX)
+        || data_width == 0
+        || data_width > u64::from(u32::MAX)
+    {
+        return Err(error(
+            GateParseErrorKind::InvalidRegister,
+            "register-array widths must be positive",
+            expression,
+        ));
+    }
+    Ok(RegisterArrayDecl {
+        name,
+        address_width: address_width as u32,
+        data_width: data_width as u32,
+        initial_value,
+    })
+}
+
 fn parse_assign(expression: &Spanned<SExpr>) -> Result<AssignStmt, GateParseError> {
     let list = exact_list(
         expression,
@@ -1077,6 +1339,27 @@ fn parse_assign(expression: &Spanned<SExpr>) -> Result<AssignStmt, GateParseErro
             "assign target must be a symbol",
         )?,
         value: parse_expr(&list[2])?,
+    })
+}
+
+fn parse_register_array_write(
+    expression: &Spanned<SExpr>,
+) -> Result<RegisterArrayWrite, GateParseError> {
+    let list = exact_list(
+        expression,
+        4,
+        GateParseErrorKind::InvalidNext,
+        "register-array-write requires array, address, and value",
+    )?;
+    Ok(RegisterArrayWrite {
+        array: identifier(
+            &list[1],
+            GateParseErrorKind::InvalidNext,
+            "array name must be a symbol",
+        )?,
+        address: parse_expr(&list[2])?,
+        value: parse_expr(&list[3])?,
+        span: expression.span,
     })
 }
 

@@ -7,12 +7,13 @@ use crate::{
     BinaryOp, CaseKey, ClockEdge, ClockEdgeSyntax, ClockedBlockId, ClockedDecl, ConstExprAst,
     ConversionKind, EnumId, EnumMemberId, Expr, GenericBinding, GenericId, GenericKind,
     GenericKindSyntax, HardwareType, InstanceId, ModuleDecl, ModuleId, ModuleItem, NextStmt,
-    PortDirection, Program, SignalId, SignalKind, SimulationTime, Span, Spanned,
+    PortDirection, Program, RomId, SignalId, SignalKind, SimulationTime, Span, Spanned,
     StaticBitMotionKind, StaticBitMotionSyntaxKind, TestbenchDecl, TestbenchId, TestbenchStmt,
     TypeExpr, TypedAssign, TypedCaseDo, TypedCaseDoArm, TypedCaseExprArm, TypedClockedBlock,
     TypedEnum, TypedEnumMember, TypedExpr, TypedExprKind, TypedGeneric, TypedGenericBinding,
-    TypedInstance, TypedModule, TypedNext, TypedPortConnection, TypedProgram, TypedReset,
-    TypedSignal, TypedTestbench, TypedTestbenchClock, TypedTestbenchStmt, UnaryOp, WidthExpr,
+    TypedInstance, TypedModule, TypedNext, TypedPortConnection, TypedProgram, TypedRegisterArray,
+    TypedRegisterArrayWrite, TypedReset, TypedRom, TypedRomEntry, TypedSignal, TypedTestbench,
+    TypedTestbenchClock, TypedTestbenchStmt, UnaryOp, WidthExpr,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +109,23 @@ pub enum SemanticErrorKind {
     InvalidEnumType,
     InvalidEnumConversion,
     EnumTypeMismatch,
+    DuplicateRom,
+    UnknownRom,
+    InvalidRomWidth,
+    InvalidRomDefault,
+    InvalidRomEntry,
+    DuplicateRomAddress,
+    InvalidRomAddress,
+    InvalidRomData,
+    InvalidRomRead,
+    DuplicateRegisterArray,
+    UnknownRegisterArray,
+    InvalidRegisterArrayWidth,
+    InvalidRegisterArrayInitial,
+    InvalidRegisterArrayRead,
+    InvalidRegisterArrayWrite,
+    RegisterArrayWriteOutsideClocked,
+    MultipleRegisterArrayWrites,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,16 +180,43 @@ struct ModuleContext {
     names: HashMap<String, usize>,
     generics: Vec<TypedGeneric>,
     enums: Vec<TypedEnum>,
+    roms: Vec<TypedRom>,
+    register_arrays: Vec<TypedRegisterArray>,
 }
 
 pub fn analyze_program(program: &Program) -> Result<TypedProgram, SemanticError> {
     let enums = collect_enums(&program.enums)?;
+    let roms = collect_roms(&program.roms)?;
+    let mut top_level_names = HashMap::<&str, Span>::new();
+    for declaration in &program.enums {
+        top_level_names.insert(&declaration.value.name.name, declaration.value.name.span);
+    }
+    for declaration in &program.roms {
+        if let Some(previous) =
+            top_level_names.insert(&declaration.value.name.name, declaration.value.name.span)
+        {
+            return Err(SemanticError::new(
+                SemanticErrorKind::DuplicateRom,
+                format!("duplicate top-level name `{}`", declaration.value.name.name),
+                declaration.value.name.span,
+            )
+            .related(previous));
+        }
+    }
     let mut module_names = HashMap::<&str, Span>::new();
     let mut next_signal = 0_u32;
     let mut next_clocked = 0_u32;
     let mut next_generic = 0_u32;
     let mut modules = Vec::with_capacity(program.modules.len());
     for (index, module) in program.modules.iter().enumerate() {
+        if let Some(previous) = top_level_names.get(module.value.name.name.as_str()) {
+            return Err(SemanticError::new(
+                SemanticErrorKind::DuplicateModule,
+                format!("duplicate top-level name `{}`", module.value.name.name),
+                module.value.name.span,
+            )
+            .related(*previous));
+        }
         if let Some(previous) = module_names.insert(&module.value.name.name, module.value.name.span)
         {
             return Err(SemanticError::new(
@@ -195,6 +240,7 @@ pub fn analyze_program(program: &Program) -> Result<TypedProgram, SemanticError>
             &mut next_clocked,
             &mut next_generic,
             &enums,
+            &roms,
         )?);
     }
     let mut next_instance = 0_u32;
@@ -246,6 +292,7 @@ pub fn analyze_program(program: &Program) -> Result<TypedProgram, SemanticError>
     }
     Ok(TypedProgram {
         enums: enums.clone(),
+        roms: roms.clone(),
         modules,
         testbenches,
         module_order,
@@ -311,6 +358,90 @@ fn collect_enums(source: &[Spanned<crate::EnumDecl>]) -> Result<Vec<TypedEnum>, 
             name: declaration.value.name.name.clone(),
             width: declaration.value.width,
             members,
+            span: declaration.span,
+        });
+    }
+    Ok(result)
+}
+
+fn collect_roms(source: &[Spanned<crate::RomDecl>]) -> Result<Vec<TypedRom>, SemanticError> {
+    let mut names = HashMap::new();
+    let mut result = Vec::new();
+    for (index, declaration) in source.iter().enumerate() {
+        if let Some(previous) = names.insert(
+            declaration.value.name.name.clone(),
+            declaration.value.name.span,
+        ) {
+            return Err(SemanticError::new(
+                SemanticErrorKind::DuplicateRom,
+                "duplicate ROM name",
+                declaration.value.name.span,
+            )
+            .related(previous));
+        }
+        let address_width = declaration.value.address_width;
+        let data_width = declaration.value.data_width;
+        let depth = 1_u64.checked_shl(address_width).ok_or_else(|| {
+            SemanticError::new(
+                SemanticErrorKind::InvalidRomWidth,
+                "ROM address width is too large",
+                declaration.span,
+            )
+        })?;
+        let fits = |value: u64| data_width >= 64 || value < (1_u64 << data_width);
+        if !fits(declaration.value.default_value) {
+            return Err(SemanticError::new(
+                SemanticErrorKind::InvalidRomDefault,
+                "ROM default value does not fit data width",
+                declaration.span,
+            ));
+        }
+        let mut addresses = HashMap::new();
+        let mut entries = Vec::new();
+        for entry in &declaration.value.entries {
+            if entry.value.address >= depth {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::InvalidRomAddress,
+                    "ROM entry address is outside depth",
+                    entry.span,
+                ));
+            }
+            if !fits(entry.value.value) {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::InvalidRomData,
+                    "ROM entry data does not fit data width",
+                    entry.span,
+                ));
+            }
+            if let Some(previous) = addresses.insert(entry.value.address, entry.span) {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::DuplicateRomAddress,
+                    "duplicate ROM entry address",
+                    entry.span,
+                )
+                .related(previous));
+            }
+            entries.push(TypedRomEntry {
+                address: entry.value.address,
+                value: entry.value.value,
+                span: entry.span,
+            });
+        }
+        entries.sort_by_key(|entry| entry.address);
+        result.push(TypedRom {
+            id: RomId(u32::try_from(index).map_err(|_| {
+                SemanticError::new(
+                    SemanticErrorKind::CannotInferType,
+                    "too many ROMs",
+                    declaration.span,
+                )
+            })?),
+            name: declaration.value.name.name.clone(),
+            address_width,
+            data_width,
+            depth,
+            default_value: declaration.value.default_value,
+            entries,
             span: declaration.span,
         });
     }
@@ -611,9 +742,10 @@ fn analyze_module(
     next_clocked_id: &mut u32,
     next_generic_id: &mut u32,
     enums: &[TypedEnum],
+    roms: &[TypedRom],
 ) -> Result<TypedModule, SemanticError> {
     let generics = collect_generics(&module.value, next_generic_id)?;
-    let context = collect_signals(&module.value, next_id, &generics, enums)?;
+    let context = collect_signals(&module.value, next_id, &generics, enums, roms)?;
     let mut signals = Vec::with_capacity(context.signals.len());
     for info in &context.signals {
         let kind = match info.class {
@@ -690,6 +822,7 @@ fn analyze_module(
         }
     }
     let mut register_drivers = HashMap::new();
+    let mut array_drivers = HashMap::new();
     let mut clocked_blocks = Vec::new();
     for item in &module.value.items {
         if let ModuleItem::Clocked(clocked) = &item.value {
@@ -707,11 +840,14 @@ fn analyze_module(
                 block_id,
                 &context,
                 &mut register_drivers,
+                &mut array_drivers,
             )?);
         }
     }
     Ok(TypedModule {
         enums: enums.to_vec(),
+        roms: roms.to_vec(),
+        register_arrays: context.register_arrays.clone(),
         id,
         name: module.value.name.name.clone(),
         name_span: module.value.name.span,
@@ -740,6 +876,8 @@ fn analyze_testbench(
         names: HashMap::new(),
         generics: Vec::new(),
         enums: module.enums.clone(),
+        roms: module.roms.clone(),
+        register_arrays: module.register_arrays.clone(),
     };
     for signal in &module.signals {
         let class = match signal.kind {
@@ -887,6 +1025,7 @@ fn analyze_clocked(
     id: ClockedBlockId,
     context: &ModuleContext,
     register_drivers: &mut HashMap<SignalId, Span>,
+    array_drivers: &mut HashMap<crate::RegisterArrayId, Span>,
 ) -> Result<TypedClockedBlock, SemanticError> {
     let clock = resolve_control_signal(
         context,
@@ -898,6 +1037,20 @@ fn analyze_clocked(
         "clock",
     )?;
     let mut normal_seen = HashMap::new();
+    let mut writes = Vec::new();
+    let mut region_arrays = HashMap::new();
+    for write in &clocked.writes {
+        let typed = analyze_array_write(write, context, &mut region_arrays)?;
+        if let Some(previous) = array_drivers.insert(typed.array_id, write.span) {
+            return Err(SemanticError::new(
+                SemanticErrorKind::MultipleRegisterArrayWrites,
+                "register-array is written by multiple clocked blocks",
+                write.span,
+            )
+            .related(previous));
+        }
+        writes.push(typed);
+    }
     let mut updates = Vec::new();
     for update in &clocked.updates {
         let typed = analyze_next(update, context, &mut normal_seen)?;
@@ -928,6 +1081,21 @@ fn analyze_clocked(
                     SemanticErrorKind::RegisterMultipleClockedDrivers,
                     "register is driven by multiple clocked blocks",
                     target_span,
+                )
+                .related(previous));
+            }
+        }
+        for write in typed
+            .arms
+            .iter()
+            .flat_map(|arm| arm.writes.iter())
+            .chain(typed.else_writes.iter())
+        {
+            if let Some(previous) = array_drivers.insert(write.array_id, write.span) {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::MultipleRegisterArrayWrites,
+                    "register-array is written by multiple clocked blocks",
+                    write.span,
                 )
                 .related(previous));
             }
@@ -990,6 +1158,7 @@ fn analyze_clocked(
         reset,
         updates,
         case_dos,
+        writes,
         span,
     })
 }
@@ -1030,12 +1199,18 @@ fn analyze_case_do(
             .iter()
             .map(|next| analyze_next(next, context, &mut seen))
             .collect::<Result<Vec<_>, _>>()?;
+        let mut writes = Vec::new();
+        let mut array_seen = HashMap::new();
+        for write in &arm.value.writes {
+            writes.push(analyze_array_write(write, context, &mut array_seen)?);
+        }
         for (target, target_span) in seen {
             all_targets.entry(target).or_insert(target_span);
         }
         arms.push(TypedCaseDoArm {
             key,
             body,
+            writes,
             span: arm.span,
         });
     }
@@ -1054,15 +1229,76 @@ fn analyze_case_do(
             Ok::<_, SemanticError>(typed)
         })
         .transpose()?;
+    let mut else_writes = Vec::new();
+    let mut else_array_seen = HashMap::new();
+    for write in &case_do.else_writes {
+        else_writes.push(analyze_array_write(write, context, &mut else_array_seen)?);
+    }
     Ok((
         TypedCaseDo {
             selector,
             arms,
             else_body,
+            else_writes,
             span,
         },
         all_targets,
     ))
+}
+
+fn analyze_array_write(
+    write: &Spanned<crate::RegisterArrayWrite>,
+    context: &ModuleContext,
+    seen: &mut HashMap<crate::RegisterArrayId, Span>,
+) -> Result<TypedRegisterArrayWrite, SemanticError> {
+    let array = context
+        .register_arrays
+        .iter()
+        .find(|array| array.name == write.value.array.name)
+        .ok_or_else(|| {
+            SemanticError::new(
+                SemanticErrorKind::UnknownRegisterArray,
+                "unknown register-array",
+                write.value.array.span,
+            )
+        })?;
+    if let Some(previous) = seen.insert(array.id, write.span) {
+        return Err(SemanticError::new(
+            SemanticErrorKind::MultipleRegisterArrayWrites,
+            "register-array is written more than once in one clocked region",
+            write.span,
+        )
+        .related(previous));
+    }
+    let address_type = HardwareType::Unsigned(array.address_width);
+    let address = check_expr(&write.value.address, Some(&address_type), context).map_err(|_| {
+        SemanticError::new(
+            SemanticErrorKind::InvalidRegisterArrayWrite,
+            "register-array write address must be exact-width unsigned",
+            write.value.address.span,
+        )
+    })?;
+    let value_type = HardwareType::Unsigned(array.data_width);
+    let value = check_expr(&write.value.value, Some(&value_type), context).map_err(|_| {
+        SemanticError::new(
+            SemanticErrorKind::InvalidRegisterArrayWrite,
+            "register-array write value must be exact-width unsigned",
+            write.value.value.span,
+        )
+    })?;
+    if address.ty != address_type || value.ty != value_type {
+        return Err(SemanticError::new(
+            SemanticErrorKind::InvalidRegisterArrayWrite,
+            "register-array write type mismatch",
+            write.span,
+        ));
+    }
+    Ok(TypedRegisterArrayWrite {
+        array_id: array.id,
+        address,
+        value,
+        span: write.span,
+    })
 }
 
 fn resolve_control_signal(
@@ -1144,12 +1380,15 @@ fn collect_signals(
     next_id: &mut u32,
     generics: &[TypedGeneric],
     enums: &[TypedEnum],
+    roms: &[TypedRom],
 ) -> Result<ModuleContext, SemanticError> {
     let mut context = ModuleContext {
         signals: Vec::new(),
         names: HashMap::new(),
         generics: generics.to_vec(),
         enums: enums.to_vec(),
+        roms: roms.to_vec(),
+        register_arrays: Vec::new(),
     };
     for port in &module.ports {
         let class = match port.value.direction {
@@ -1186,6 +1425,54 @@ fn collect_signals(
                 item.span,
                 reg.initial.clone(),
             )?,
+            ModuleItem::RegisterArray(array) => {
+                if context.names.contains_key(&array.name.name)
+                    || context
+                        .register_arrays
+                        .iter()
+                        .any(|item| item.name == array.name.name)
+                {
+                    return Err(SemanticError::new(
+                        SemanticErrorKind::DuplicateRegisterArray,
+                        format!("duplicate register-array `{}`", array.name.name),
+                        item.span,
+                    ));
+                }
+                let depth = 1_u64.checked_shl(array.address_width).ok_or_else(|| {
+                    SemanticError::new(
+                        SemanticErrorKind::InvalidRegisterArrayWidth,
+                        "register-array address width is too large",
+                        item.span,
+                    )
+                })?;
+                let fits =
+                    |value: u64| array.data_width >= 64 || value < (1_u64 << array.data_width);
+                if !fits(array.initial_value) {
+                    return Err(SemanticError::new(
+                        SemanticErrorKind::InvalidRegisterArrayInitial,
+                        "register-array initial value does not fit data width",
+                        item.span,
+                    ));
+                }
+                let id = crate::RegisterArrayId(
+                    u32::try_from(context.register_arrays.len()).map_err(|_| {
+                        SemanticError::new(
+                            SemanticErrorKind::CannotInferType,
+                            "too many register arrays",
+                            item.span,
+                        )
+                    })?,
+                );
+                context.register_arrays.push(TypedRegisterArray {
+                    id,
+                    name: array.name.name.clone(),
+                    address_width: array.address_width,
+                    data_width: array.data_width,
+                    depth,
+                    initial_value: array.initial_value,
+                    span: item.span,
+                });
+            }
             ModuleItem::Assign(_) | ModuleItem::Clocked(_) | ModuleItem::Instance(_) => {}
         }
     }
@@ -1613,6 +1900,110 @@ fn check_call(
     span: Span,
 ) -> Result<TypedExpr, SemanticError> {
     match name {
+        "rom-read" => {
+            if args.len() != 2 {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::WrongArgumentCount,
+                    "rom-read expects ROM name and address",
+                    span,
+                ));
+            }
+            let Expr::Reference(identifier) = &args[0].value else {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::UnknownRom,
+                    "rom-read requires a ROM name",
+                    args[0].span,
+                ));
+            };
+            let rom = context
+                .roms
+                .iter()
+                .find(|rom| rom.name == identifier.name)
+                .ok_or_else(|| {
+                    SemanticError::new(
+                        SemanticErrorKind::UnknownRom,
+                        "unknown ROM",
+                        identifier.span,
+                    )
+                })?;
+            let address_type = HardwareType::Unsigned(rom.address_width);
+            let address = check_expr(&args[1], Some(&address_type), context).map_err(|_| {
+                SemanticError::new(
+                    SemanticErrorKind::InvalidRomRead,
+                    "ROM address must be an exact-width unsigned vector or in-range integer",
+                    args[1].span,
+                )
+            })?;
+            if address.ty != address_type {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::InvalidRomRead,
+                    "ROM address width is inconsistent",
+                    args[1].span,
+                ));
+            }
+            Ok(TypedExpr {
+                kind: TypedExprKind::RomRead {
+                    rom_id: rom.id,
+                    address: Box::new(address),
+                    address_width: rom.address_width,
+                    data_width: rom.data_width,
+                },
+                ty: HardwareType::Unsigned(rom.data_width),
+                span,
+            })
+        }
+        "register-array-read" => {
+            if args.len() != 2 {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::WrongArgumentCount,
+                    "register-array-read expects array name and address",
+                    span,
+                ));
+            }
+            let Expr::Reference(identifier) = &args[0].value else {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::UnknownRegisterArray,
+                    "register-array-read requires an array name",
+                    args[0].span,
+                ));
+            };
+            let array = context
+                .register_arrays
+                .iter()
+                .find(|array| array.name == identifier.name)
+                .ok_or_else(|| {
+                    SemanticError::new(
+                        SemanticErrorKind::UnknownRegisterArray,
+                        "unknown register-array",
+                        identifier.span,
+                    )
+                })?;
+            let address_type = HardwareType::Unsigned(array.address_width);
+            let address = check_expr(&args[1], Some(&address_type), context).map_err(|_| {
+                SemanticError::new(
+                    SemanticErrorKind::InvalidRegisterArrayRead,
+                    "register-array address must be exact-width unsigned",
+                    args[1].span,
+                )
+            })?;
+            if address.ty != address_type {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::InvalidRegisterArrayRead,
+                    "register-array address width is inconsistent",
+                    args[1].span,
+                ));
+            }
+            Ok(TypedExpr {
+                kind: TypedExprKind::RegisterArrayRead {
+                    array_id: array.id,
+                    address: Box::new(address),
+                    address_width: array.address_width,
+                    data_width: array.data_width,
+                },
+                ty: HardwareType::Unsigned(array.data_width),
+                span,
+            })
+        }
         "enum-from-bits" => {
             require_arity(name, args, 2, span)?;
             let Expr::Reference(identifier) = &args[0].value else {

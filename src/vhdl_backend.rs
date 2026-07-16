@@ -52,6 +52,8 @@ struct LowerContext {
     generics: Vec<crate::GenericId>,
     generic_minimums: HashMap<crate::GenericId, u64>,
     enums: Vec<crate::TypedEnum>,
+    roms: Vec<crate::TypedRom>,
+    register_arrays: Vec<crate::TypedRegisterArray>,
     temporary: u32,
     variables: Vec<VhdlVariable>,
 }
@@ -121,6 +123,31 @@ fn lower_module(
                 }
             }
         }
+    }
+    for rom in &module.roms {
+        if module_uses_rom(module, rom.id) {
+            declarations.push(VhdlDeclaration::Rom {
+                name: rom_name(rom),
+                address_width: rom.address_width,
+                data_width: rom.data_width,
+                depth: rom.depth,
+                default_value: rom.default_value,
+                entries: rom
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.address, entry.value))
+                    .collect(),
+            });
+        }
+    }
+    for array in &module.register_arrays {
+        declarations.push(VhdlDeclaration::RegisterArray {
+            name: register_array_name(array),
+            address_width: array.address_width,
+            data_width: array.data_width,
+            depth: array.depth,
+            initial_value: array.initial_value,
+        });
     }
     let mut names = HashMap::new();
     for signal in &module.signals {
@@ -255,6 +282,8 @@ fn lower_module(
                 })
                 .collect(),
             enums: module.enums.clone(),
+            roms: module.roms.clone(),
+            register_arrays: module.register_arrays.clone(),
             temporary: 0,
             variables: Vec::new(),
         };
@@ -308,6 +337,8 @@ fn lower_module(
                 })
                 .collect(),
             &module.enums,
+            &module.roms,
+            &module.register_arrays,
         )?));
     }
     for instance in &module.instances {
@@ -443,6 +474,8 @@ fn lower_clocked(
     generics: &[crate::GenericId],
     generic_minimums: &HashMap<crate::GenericId, u64>,
     enums: &[crate::TypedEnum],
+    roms: &[crate::TypedRom],
+    register_arrays: &[crate::TypedRegisterArray],
 ) -> Result<VhdlProcess, VhdlBackendError> {
     let clock = signal_name(names, block.clock)?.read.clone();
     let mut context = LowerContext {
@@ -450,10 +483,13 @@ fn lower_clocked(
         generics: generics.to_vec(),
         generic_minimums: generic_minimums.clone(),
         enums: enums.to_vec(),
+        roms: roms.to_vec(),
+        register_arrays: register_arrays.to_vec(),
         temporary: 0,
         variables: Vec::new(),
     };
     let mut normal = lower_updates(&block.updates, &mut context)?;
+    normal.extend(lower_array_writes(&block.writes, &mut context)?);
     for case_do in &block.case_dos {
         normal.extend(lower_case_do(case_do, &mut context)?);
     }
@@ -516,6 +552,34 @@ fn lower_clocked(
     })
 }
 
+fn lower_array_writes(
+    writes: &[crate::TypedRegisterArrayWrite],
+    context: &mut LowerContext,
+) -> Result<Vec<VhdlSequentialStatement>, VhdlBackendError> {
+    let mut statements = Vec::new();
+    for write in writes {
+        let array = context
+            .register_arrays
+            .iter()
+            .find(|array| array.id == write.array_id)
+            .cloned()
+            .ok_or_else(|| {
+                VhdlBackendError::new(
+                    VhdlBackendErrorKind::InconsistentId,
+                    "unknown register-array id",
+                )
+            })?;
+        let address = lower_expr(&write.address, context, &mut statements)?;
+        let value = lower_expr(&write.value, context, &mut statements)?;
+        statements.push(VhdlSequentialStatement::IndexedSignalAssignment {
+            array: register_array_name(&array),
+            index: address,
+            value,
+        });
+    }
+    Ok(statements)
+}
+
 fn lower_updates(
     updates: &[TypedNext],
     context: &mut LowerContext,
@@ -563,6 +627,7 @@ fn lower_case_do(
         .map(|body| lower_updates(body, context))
         .transpose()?
         .unwrap_or_default();
+    otherwise.extend(lower_array_writes(&case_do.else_writes, context)?);
     let mut labels = std::collections::HashSet::new();
     for arm in case_do.arms.iter().rev() {
         validate_case_key(
@@ -572,7 +637,8 @@ fn lower_case_do(
             &context.enums,
             &mut labels,
         )?;
-        let body = lower_updates(&arm.body, context)?;
+        let mut body = lower_updates(&arm.body, context)?;
+        body.extend(lower_array_writes(&arm.writes, context)?);
         otherwise = vec![VhdlSequentialStatement::If {
             condition: VhdlExpression::Binary {
                 op: "=".into(),
@@ -758,6 +824,22 @@ fn lower_testbench(
         sanitize(&testbench.name)
     ));
     let mut declarations = vec![VhdlDeclaration::BoolToStdLogicFunction];
+    for rom in &module.roms {
+        if testbench_uses_rom(testbench, rom.id) {
+            declarations.push(VhdlDeclaration::Rom {
+                name: rom_name(rom),
+                address_width: rom.address_width,
+                data_width: rom.data_width,
+                depth: rom.depth,
+                default_value: rom.default_value,
+                entries: rom
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.address, entry.value))
+                    .collect(),
+            });
+        }
+    }
     let (need_unsigned_truncate, need_signed_truncate) = testbench_truncate_helpers(testbench);
     if need_unsigned_truncate {
         declarations.push(VhdlDeclaration::TruncateUnsignedFunction);
@@ -864,6 +946,8 @@ fn lower_testbench(
         generics: Vec::new(),
         generic_minimums: HashMap::new(),
         enums: module.enums.clone(),
+        roms: module.roms.clone(),
+        register_arrays: module.register_arrays.clone(),
         temporary: 0,
         variables: Vec::new(),
     };
@@ -1404,6 +1488,76 @@ fn lower_expr(
             }
             lower_expr(value, context, prelude)
         }
+        TypedExprKind::RomRead {
+            rom_id,
+            address,
+            address_width,
+            data_width,
+        } => {
+            let rom = context
+                .roms
+                .iter()
+                .find(|rom| rom.id == *rom_id)
+                .cloned()
+                .ok_or_else(|| {
+                    VhdlBackendError::new(
+                        VhdlBackendErrorKind::InconsistentId,
+                        "ROM read references an unknown RomId",
+                    )
+                })?;
+            if rom.address_width != *address_width
+                || rom.data_width != *data_width
+                || expr.ty != HardwareType::Unsigned(*data_width)
+                || address.ty != HardwareType::Unsigned(*address_width)
+            {
+                return Err(VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "ROM read type information is inconsistent",
+                ));
+            }
+            let address = lower_expr(address, context, prelude)?;
+            Ok(VhdlExpression::Call {
+                function: rom_name(&rom),
+                arguments: vec![VhdlExpression::Call {
+                    function: VhdlIdentifier("to_integer".into()),
+                    arguments: vec![address],
+                }],
+            })
+        }
+        TypedExprKind::RegisterArrayRead {
+            array_id,
+            address,
+            address_width,
+            data_width,
+        } => {
+            let array = context
+                .register_arrays
+                .iter()
+                .find(|array| array.id == *array_id)
+                .ok_or_else(|| {
+                    VhdlBackendError::new(
+                        VhdlBackendErrorKind::InconsistentId,
+                        "register-array read references an unknown RegisterArrayId",
+                    )
+                })?;
+            if array.address_width != *address_width
+                || array.data_width != *data_width
+                || expr.ty != HardwareType::Unsigned(*data_width)
+                || address.ty != HardwareType::Unsigned(*address_width)
+            {
+                return Err(VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "register-array read type information is inconsistent",
+                ));
+            }
+            Ok(VhdlExpression::Call {
+                function: register_array_name(array),
+                arguments: vec![VhdlExpression::Call {
+                    function: VhdlIdentifier("to_integer".into()),
+                    arguments: vec![lower_expr(address, context, prelude)?],
+                }],
+            })
+        }
         TypedExprKind::Case {
             selector,
             arms,
@@ -1688,6 +1842,8 @@ fn expr_truncate_helpers(expr: &TypedExpr, flags: &mut (bool, bool)) {
             expr_truncate_helpers(value, flags)
         }
         TypedExprKind::EnumValue { .. } => {}
+        TypedExprKind::RomRead { address, .. } => expr_truncate_helpers(address, flags),
+        TypedExprKind::RegisterArrayRead { address, .. } => expr_truncate_helpers(address, flags),
         TypedExprKind::Case {
             selector,
             arms,
@@ -1751,7 +1907,8 @@ fn expr_has_bit_concat(expr: &TypedExpr) -> bool {
             .any(|v| v.ty == HardwareType::Bit || expr_has_bit_concat(v)),
         TypedExprKind::Slice { value, .. }
         | TypedExprKind::Convert { value, .. }
-        | TypedExprKind::Unary { operand: value, .. } => expr_has_bit_concat(value),
+        | TypedExprKind::Unary { operand: value, .. }
+        | TypedExprKind::RegisterArrayRead { address: value, .. } => expr_has_bit_concat(value),
         TypedExprKind::Binary { left, right, .. } => {
             expr_has_bit_concat(left) || expr_has_bit_concat(right)
         }
@@ -1773,6 +1930,7 @@ fn expr_has_bit_concat(expr: &TypedExpr) -> bool {
             expr_has_bit_concat(value)
         }
         TypedExprKind::EnumValue { .. } => false,
+        TypedExprKind::RomRead { address, .. } => expr_has_bit_concat(address),
         TypedExprKind::Case {
             selector,
             arms,
@@ -1811,7 +1969,8 @@ fn expr_has_reverse_bits(expr: &TypedExpr) -> bool {
         TypedExprKind::ReverseBits { .. } => true,
         TypedExprKind::Slice { value, .. }
         | TypedExprKind::Convert { value, .. }
-        | TypedExprKind::Unary { operand: value, .. } => expr_has_reverse_bits(value),
+        | TypedExprKind::Unary { operand: value, .. }
+        | TypedExprKind::RegisterArrayRead { address: value, .. } => expr_has_reverse_bits(value),
         TypedExprKind::Binary { left, right, .. } => {
             expr_has_reverse_bits(left) || expr_has_reverse_bits(right)
         }
@@ -1831,6 +1990,7 @@ fn expr_has_reverse_bits(expr: &TypedExpr) -> bool {
             expr_has_reverse_bits(value)
         }
         TypedExprKind::EnumValue { .. } => false,
+        TypedExprKind::RomRead { address, .. } => expr_has_reverse_bits(address),
         TypedExprKind::Case {
             selector,
             arms,
@@ -1890,6 +2050,8 @@ fn expr_has_bit_at(expr: &TypedExpr) -> bool {
         TypedExprKind::Signal(_) | TypedExprKind::Integer(_) | TypedExprKind::EnumValue { .. } => {
             false
         }
+        TypedExprKind::RomRead { address, .. } => expr_has_bit_at(address),
+        TypedExprKind::RegisterArrayRead { address, .. } => expr_has_bit_at(address),
         TypedExprKind::Case {
             selector,
             arms,
@@ -2091,6 +2253,14 @@ fn enum_member_name(
     ))
 }
 
+fn rom_name(rom: &crate::TypedRom) -> VhdlIdentifier {
+    VhdlIdentifier(format!("gl_rom_{}", sanitize(&rom.name)))
+}
+
+fn register_array_name(array: &crate::TypedRegisterArray) -> VhdlIdentifier {
+    VhdlIdentifier(format!("gl_register_array_{}", sanitize(&array.name)))
+}
+
 fn lower_enum_constant(
     enums: &[crate::TypedEnum],
     enum_id: crate::EnumId,
@@ -2204,6 +2374,90 @@ fn testbench_enum_members(
     members
 }
 
+fn module_uses_rom(module: &TypedModule, id: crate::RomId) -> bool {
+    module
+        .assignments
+        .iter()
+        .any(|assignment| expr_uses_rom(&assignment.value, id))
+        || module.clocked_blocks.iter().any(|block| {
+            block
+                .updates
+                .iter()
+                .any(|update| expr_uses_rom(&update.value, id))
+                || block.reset.as_ref().is_some_and(|reset| {
+                    reset
+                        .updates
+                        .iter()
+                        .any(|update| expr_uses_rom(&update.value, id))
+                })
+                || block.case_dos.iter().any(|case_do| {
+                    expr_uses_rom(&case_do.selector, id)
+                        || case_do.arms.iter().any(|arm| {
+                            arm.body
+                                .iter()
+                                .any(|update| expr_uses_rom(&update.value, id))
+                        })
+                        || case_do.else_body.as_ref().is_some_and(|body| {
+                            body.iter().any(|update| expr_uses_rom(&update.value, id))
+                        })
+                })
+        })
+}
+
+fn testbench_uses_rom(testbench: &TypedTestbench, id: crate::RomId) -> bool {
+    testbench
+        .statements
+        .iter()
+        .any(|statement| match statement {
+            TypedTestbenchStmt::Drive { value, .. } => expr_uses_rom(value, id),
+            TypedTestbenchStmt::Assert { condition, .. } => expr_uses_rom(condition, id),
+            TypedTestbenchStmt::Wait { .. } | TypedTestbenchStmt::WaitRising { .. } => false,
+        })
+}
+
+fn expr_uses_rom(expr: &TypedExpr, id: crate::RomId) -> bool {
+    match &expr.kind {
+        TypedExprKind::RomRead {
+            rom_id, address, ..
+        } => *rom_id == id || expr_uses_rom(address, id),
+        TypedExprKind::RegisterArrayRead { address, .. } => expr_uses_rom(address, id),
+        TypedExprKind::Unary { operand, .. } => expr_uses_rom(operand, id),
+        TypedExprKind::Binary { left, right, .. } => {
+            expr_uses_rom(left, id) || expr_uses_rom(right, id)
+        }
+        TypedExprKind::If {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            expr_uses_rom(condition, id)
+                || expr_uses_rom(when_true, id)
+                || expr_uses_rom(when_false, id)
+        }
+        TypedExprKind::Convert { value, .. }
+        | TypedExprKind::Slice { value, .. }
+        | TypedExprKind::ReverseBits { value }
+        | TypedExprKind::StaticBitMotion { value, .. }
+        | TypedExprKind::BitAt { source: value, .. } => expr_uses_rom(value, id),
+        TypedExprKind::Concat { values } => values.iter().any(|value| expr_uses_rom(value, id)),
+        TypedExprKind::Case {
+            selector,
+            arms,
+            else_expr,
+        } => {
+            expr_uses_rom(selector, id)
+                || arms.iter().any(|arm| expr_uses_rom(&arm.result, id))
+                || expr_uses_rom(else_expr, id)
+        }
+        TypedExprKind::EnumFromBits { value, .. } | TypedExprKind::EnumToBits { value, .. } => {
+            expr_uses_rom(value, id)
+        }
+        TypedExprKind::Signal(_) | TypedExprKind::Integer(_) | TypedExprKind::EnumValue { .. } => {
+            false
+        }
+    }
+}
+
 fn collect_enum_members_expr(
     expr: &TypedExpr,
     id: crate::EnumId,
@@ -2267,6 +2521,10 @@ fn collect_enum_members_expr(
             collect_enum_members_expr(else_expr, id, members);
         }
         TypedExprKind::Signal(_) | TypedExprKind::Integer(_) => {}
+        TypedExprKind::RomRead { address, .. } => collect_enum_members_expr(address, id, members),
+        TypedExprKind::RegisterArrayRead { address, .. } => {
+            collect_enum_members_expr(address, id, members)
+        }
     }
 }
 fn lower_width(width: &WidthExpr) -> Result<VhdlExpression, VhdlBackendError> {

@@ -77,6 +77,21 @@ pub enum VhdlDeclaration {
         width: u32,
         value: u64,
     },
+    Rom {
+        name: VhdlIdentifier,
+        address_width: u32,
+        data_width: u32,
+        depth: u64,
+        default_value: u64,
+        entries: Vec<(u64, u64)>,
+    },
+    RegisterArray {
+        name: VhdlIdentifier,
+        address_width: u32,
+        data_width: u32,
+        depth: u64,
+        initial_value: u64,
+    },
     Constant {
         name: VhdlIdentifier,
         ty: String,
@@ -124,6 +139,11 @@ pub struct VhdlVariable {
 pub enum VhdlSequentialStatement {
     SignalAssignment {
         target: VhdlIdentifier,
+        value: VhdlExpression,
+    },
+    IndexedSignalAssignment {
+        array: VhdlIdentifier,
+        index: VhdlExpression,
         value: VhdlExpression,
     },
     VariableAssignment {

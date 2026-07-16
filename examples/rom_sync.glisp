@@ -1,0 +1,9 @@
+(rom table :address-width 3 :data-width 8 :default 0
+  (0 1) (2 4) (7 255))
+
+(module rom-sync
+  (ports (clk :in bit) (address :in (unsigned 3)) (value :out (unsigned 8)))
+  (reg output (unsigned 8) 0)
+  (clocked clk
+    (next output (rom-read table address)))
+  (assign value output))

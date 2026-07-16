@@ -1,0 +1,15 @@
+(enum Opcode :width 5 (NOP 0) (WRITE-IMM 1) (TRANSFER 2) (JUMP 3) (JUMP-IF 4))
+(rom microcode :address-width 8 :data-width 24 :default 0
+  (0 0) (1 1048577) (2 2097154))
+
+(module enum-opcode-rom
+  (ports (instruction :in (unsigned 24)) (opcode :out Opcode)
+    (is-jump :out bit) (micro-value :out (unsigned 24)))
+  (assign opcode
+    (enum-from-bits Opcode (slice instruction 19 5)))
+  (assign is-jump
+    (case opcode
+      (Opcode.JUMP 1)
+      (Opcode.JUMP-IF 1)
+      (else 0)))
+  (assign micro-value (rom-read microcode (slice instruction 0 8))))
