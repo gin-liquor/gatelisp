@@ -197,4 +197,12 @@ pub enum Expr {
         callee: Identifier,
         arguments: Vec<Spanned<Expr>>,
     },
+    Resize {
+        target: Spanned<TypeExpr>,
+        value: Box<Spanned<Expr>>,
+    },
+    Truncate {
+        target: Spanned<TypeExpr>,
+        value: Box<Spanned<Expr>>,
+    },
 }

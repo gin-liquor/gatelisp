@@ -223,6 +223,19 @@ pub enum TypedExprKind {
         when_true: Box<TypedExpr>,
         when_false: Box<TypedExpr>,
     },
+    Convert {
+        kind: ConversionKind,
+        value: Box<TypedExpr>,
+        target_type: HardwareType,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversionKind {
+    Resize,
+    Truncate,
+    AsSigned,
+    AsUnsigned,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

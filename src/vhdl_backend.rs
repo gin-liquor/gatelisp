@@ -1,10 +1,11 @@
 use crate::{
-    BinaryOp, ClockEdge, GenericKind, HardwareType, ModuleId, PortDirection, ResetKind, SignalId,
-    SignalKind, TimeUnit, TypedClockedBlock, TypedExpr, TypedExprKind, TypedModule, TypedNext,
-    TypedProgram, TypedTestbench, TypedTestbenchStmt, UnaryOp, VhdlArchitecture,
-    VhdlConcurrentStatement, VhdlDeclaration, VhdlDesign, VhdlDesignUnit, VhdlEntity,
-    VhdlExpression, VhdlGeneric, VhdlGenericKind, VhdlIdentifier, VhdlPort, VhdlPortMode,
-    VhdlProcess, VhdlSensitivity, VhdlSequentialStatement, VhdlType, VhdlVariable, WidthExpr,
+    BinaryOp, ClockEdge, ConversionKind, GenericKind, HardwareType, ModuleId, PortDirection,
+    ResetKind, SignalId, SignalKind, TimeUnit, TypedClockedBlock, TypedExpr, TypedExprKind,
+    TypedModule, TypedNext, TypedProgram, TypedTestbench, TypedTestbenchStmt, UnaryOp,
+    VhdlArchitecture, VhdlConcurrentStatement, VhdlDeclaration, VhdlDesign, VhdlDesignUnit,
+    VhdlEntity, VhdlExpression, VhdlGeneric, VhdlGenericKind, VhdlIdentifier, VhdlPort,
+    VhdlPortMode, VhdlProcess, VhdlSensitivity, VhdlSequentialStatement, VhdlType, VhdlVariable,
+    WidthExpr,
 };
 use std::{collections::HashMap, fmt};
 
@@ -178,6 +179,13 @@ fn lower_module(
         }
     }
     declarations.push(VhdlDeclaration::BoolToStdLogicFunction);
+    let (need_unsigned_truncate, need_signed_truncate) = module_truncate_helpers(module);
+    if need_unsigned_truncate {
+        declarations.push(VhdlDeclaration::TruncateUnsignedFunction);
+    }
+    if need_signed_truncate {
+        declarations.push(VhdlDeclaration::TruncateSignedFunction);
+    }
     let mut statements = Vec::new();
     for (index, assignment) in module.assignments.iter().enumerate() {
         let target = signal_name(&names, assignment.target)?.read.clone();
@@ -424,6 +432,13 @@ fn lower_testbench(
         sanitize(&testbench.name)
     ));
     let mut declarations = vec![VhdlDeclaration::BoolToStdLogicFunction];
+    let (need_unsigned_truncate, need_signed_truncate) = testbench_truncate_helpers(testbench);
+    if need_unsigned_truncate {
+        declarations.push(VhdlDeclaration::TruncateUnsignedFunction);
+    }
+    if need_signed_truncate {
+        declarations.push(VhdlDeclaration::TruncateSignedFunction);
+    }
     let mut names = HashMap::new();
     let mut port_map = Vec::new();
     for signal in &module.signals {
@@ -676,7 +691,197 @@ fn lower_expr(
             });
             Ok(VhdlExpression::Name(name))
         }
+        TypedExprKind::Convert {
+            kind,
+            value,
+            target_type,
+        } => {
+            if &expr.ty != target_type {
+                return Err(VhdlBackendError::new(
+                    VhdlBackendErrorKind::InvalidTypedExpression,
+                    "conversion result type is inconsistent",
+                ));
+            }
+            validate_conversion(*kind, &value.ty, target_type)?;
+            let source = lower_expr(value, context, prelude)?;
+            let function = match kind {
+                ConversionKind::Resize => "resize",
+                ConversionKind::Truncate => {
+                    if matches!(
+                        target_type,
+                        HardwareType::Unsigned(_) | HardwareType::SymbolicUnsigned(_)
+                    ) {
+                        "gl_truncate_unsigned"
+                    } else if matches!(
+                        target_type,
+                        HardwareType::Signed(_) | HardwareType::SymbolicSigned(_)
+                    ) {
+                        "gl_truncate_signed"
+                    } else {
+                        return Err(VhdlBackendError::new(
+                            VhdlBackendErrorKind::InvalidTypedExpression,
+                            "truncate target must be a vector",
+                        ));
+                    }
+                }
+                ConversionKind::AsSigned => "signed",
+                ConversionKind::AsUnsigned => "unsigned",
+            };
+            let mut arguments = vec![source];
+            if matches!(kind, ConversionKind::Resize | ConversionKind::Truncate) {
+                arguments.push(lower_width(&hardware_width(target_type).ok_or_else(
+                    || {
+                        VhdlBackendError::new(
+                            VhdlBackendErrorKind::InvalidTypedExpression,
+                            "conversion target must be a vector",
+                        )
+                    },
+                )?)?);
+            }
+            Ok(VhdlExpression::Call {
+                function: VhdlIdentifier(function.into()),
+                arguments,
+            })
+        }
     }
+}
+
+fn hardware_width(ty: &HardwareType) -> Option<WidthExpr> {
+    match ty {
+        HardwareType::Unsigned(v) | HardwareType::Signed(v) => {
+            Some(WidthExpr::Constant(u64::from(*v)))
+        }
+        HardwareType::SymbolicUnsigned(v) | HardwareType::SymbolicSigned(v) => Some(v.clone()),
+        HardwareType::Bit => None,
+    }
+}
+fn hardware_signedness(ty: &HardwareType) -> Option<bool> {
+    match ty {
+        HardwareType::Unsigned(_) | HardwareType::SymbolicUnsigned(_) => Some(false),
+        HardwareType::Signed(_) | HardwareType::SymbolicSigned(_) => Some(true),
+        HardwareType::Bit => None,
+    }
+}
+fn validate_conversion(
+    kind: ConversionKind,
+    source: &HardwareType,
+    target: &HardwareType,
+) -> Result<(), VhdlBackendError> {
+    let source_signed = hardware_signedness(source).ok_or_else(|| {
+        VhdlBackendError::new(
+            VhdlBackendErrorKind::InvalidTypedExpression,
+            "conversion source is not a vector",
+        )
+    })?;
+    let target_signed = hardware_signedness(target).ok_or_else(|| {
+        VhdlBackendError::new(
+            VhdlBackendErrorKind::InvalidTypedExpression,
+            "conversion target is not a vector",
+        )
+    })?;
+    let source_width = hardware_width(source).ok_or_else(|| {
+        VhdlBackendError::new(
+            VhdlBackendErrorKind::InvalidTypedExpression,
+            "conversion source width is missing",
+        )
+    })?;
+    let target_width = hardware_width(target).ok_or_else(|| {
+        VhdlBackendError::new(
+            VhdlBackendErrorKind::InvalidTypedExpression,
+            "conversion target width is missing",
+        )
+    })?;
+    let valid = match kind {
+        ConversionKind::Resize => {
+            source_signed == target_signed
+                && !matches!((&source_width,&target_width),(WidthExpr::Constant(s),WidthExpr::Constant(t)) if t<s)
+        }
+        ConversionKind::Truncate => {
+            source_signed == target_signed
+                && !matches!((&source_width,&target_width),(WidthExpr::Constant(s),WidthExpr::Constant(t)) if t>s)
+        }
+        ConversionKind::AsSigned => !source_signed && target_signed && source_width == target_width,
+        ConversionKind::AsUnsigned => {
+            source_signed && !target_signed && source_width == target_width
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(VhdlBackendError::new(
+            VhdlBackendErrorKind::InvalidTypedExpression,
+            "invalid typed conversion",
+        ))
+    }
+}
+fn expr_truncate_helpers(expr: &TypedExpr, flags: &mut (bool, bool)) {
+    match &expr.kind {
+        TypedExprKind::Convert {
+            kind: ConversionKind::Truncate,
+            value,
+            target_type,
+        } => {
+            if matches!(
+                target_type,
+                HardwareType::Unsigned(_) | HardwareType::SymbolicUnsigned(_)
+            ) {
+                flags.0 = true
+            } else if matches!(
+                target_type,
+                HardwareType::Signed(_) | HardwareType::SymbolicSigned(_)
+            ) {
+                flags.1 = true
+            }
+            expr_truncate_helpers(value, flags)
+        }
+        TypedExprKind::Convert { value, .. } | TypedExprKind::Unary { operand: value, .. } => {
+            expr_truncate_helpers(value, flags)
+        }
+        TypedExprKind::Binary { left, right, .. } => {
+            expr_truncate_helpers(left, flags);
+            expr_truncate_helpers(right, flags)
+        }
+        TypedExprKind::If {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            expr_truncate_helpers(condition, flags);
+            expr_truncate_helpers(when_true, flags);
+            expr_truncate_helpers(when_false, flags)
+        }
+        TypedExprKind::Signal(_) | TypedExprKind::Integer(_) => {}
+    }
+}
+fn module_truncate_helpers(module: &TypedModule) -> (bool, bool) {
+    let mut flags = (false, false);
+    for assign in &module.assignments {
+        expr_truncate_helpers(&assign.value, &mut flags)
+    }
+    for block in &module.clocked_blocks {
+        for update in &block.updates {
+            expr_truncate_helpers(&update.value, &mut flags)
+        }
+        if let Some(reset) = &block.reset {
+            for update in &reset.updates {
+                expr_truncate_helpers(&update.value, &mut flags)
+            }
+        }
+    }
+    flags
+}
+fn testbench_truncate_helpers(testbench: &TypedTestbench) -> (bool, bool) {
+    let mut flags = (false, false);
+    for statement in &testbench.statements {
+        match statement {
+            TypedTestbenchStmt::Drive { value, .. } => expr_truncate_helpers(value, &mut flags),
+            TypedTestbenchStmt::Assert { condition, .. } => {
+                expr_truncate_helpers(condition, &mut flags)
+            }
+            _ => {}
+        }
+    }
+    flags
 }
 
 fn lower_type(ty: &HardwareType) -> Result<VhdlType, VhdlBackendError> {

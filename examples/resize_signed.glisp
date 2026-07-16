@@ -1,0 +1,3 @@
+(module resize-signed
+  (ports (input :in (signed 8)) (value :out (signed 16)))
+  (assign value (resize (signed 16) input)))

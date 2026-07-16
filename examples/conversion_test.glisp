@@ -1,0 +1,20 @@
+(module conversion-dut
+  (ports
+    (unsigned-input :in (unsigned 8))
+    (signed-input :in (signed 16))
+    (extended :out (unsigned 16))
+    (truncated :out (signed 8))
+    (reinterpreted :out (signed 8)))
+  (assign extended (resize (unsigned 16) unsigned-input))
+  (assign truncated (truncate (signed 8) signed-input))
+  (assign reinterpreted (as-signed unsigned-input)))
+
+(testbench conversion-test
+  (target conversion-dut)
+  (stimulus
+    (drive unsigned-input 255)
+    (drive signed-input 255)
+    (wait 1 ns)
+    (assert (= extended 255) "unsigned resize must zero extend")
+    (assert (= truncated -1) "signed truncate must keep low 8 bits")
+    (assert (= reinterpreted -1) "as-signed must preserve bits")))

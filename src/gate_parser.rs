@@ -848,6 +848,25 @@ fn parse_expr(expression: &Spanned<SExpr>) -> Result<Spanned<Expr>, GateParseErr
                 GateParseErrorKind::InvalidCallTarget,
                 "call target must be a symbol",
             )?;
+            if matches!(callee.name.as_str(), "resize" | "truncate") {
+                if list.len() != 3 {
+                    return Err(error(
+                        GateParseErrorKind::InvalidExpression,
+                        "resize and truncate require target type and value",
+                        expression,
+                    ));
+                }
+                let target = parse_type(&list[1])?;
+                let value = Box::new(parse_expr(&list[2])?);
+                return Ok(Spanned {
+                    value: if callee.name == "resize" {
+                        Expr::Resize { target, value }
+                    } else {
+                        Expr::Truncate { target, value }
+                    },
+                    span: expression.span,
+                });
+            }
             let arguments = list[1..].iter().map(parse_expr).collect::<Result<_, _>>()?;
             Expr::Call { callee, arguments }
         }

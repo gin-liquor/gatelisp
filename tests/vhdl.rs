@@ -48,6 +48,28 @@ fn generated_vhdl_matches_golden_files() {
             "generic_testbench",
             include_str!("golden/generic_testbench.expected.vhd"),
         ),
+        (
+            "resize_unsigned",
+            include_str!("golden/resize_unsigned.expected.vhd"),
+        ),
+        (
+            "resize_signed",
+            include_str!("golden/resize_signed.expected.vhd"),
+        ),
+        ("truncate", include_str!("golden/truncate.expected.vhd")),
+        (
+            "reinterpret",
+            include_str!("golden/reinterpret.expected.vhd"),
+        ),
+        ("wide_adder", include_str!("golden/wide_adder.expected.vhd")),
+        (
+            "generic_resize",
+            include_str!("golden/generic_resize.expected.vhd"),
+        ),
+        (
+            "conversion_test",
+            include_str!("golden/conversion_test.expected.vhd"),
+        ),
     ] {
         assert_eq!(
             compile_example(name).replace("\r\n", "\n"),

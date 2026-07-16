@@ -1,0 +1,9 @@
+(module reinterpret-example
+  (ports
+    (input :in (unsigned 8))
+    (signed-value :out (signed 8))
+    (round-trip :out (unsigned 8)))
+  (wire internal (signed 8))
+  (assign internal (as-signed input))
+  (assign signed-value internal)
+  (assign round-trip (as-unsigned internal)))

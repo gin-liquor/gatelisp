@@ -161,6 +161,48 @@ Boolean, string, and enum generics; subtraction and division in constant
 expressions; generate constructs; and reading generic values as runtime signals
 are not implemented.
 
+## Explicit conversions
+
+GateLisp never converts vector widths or signedness implicitly. Four explicit
+operations make the intended hardware behavior visible:
+
+```lisp
+(resize (unsigned 16) input)
+(truncate (unsigned 8) wide-value)
+(as-signed unsigned-value)
+(as-unsigned signed-value)
+```
+
+`resize` accepts only the same signedness and an equal or wider target. It zero
+extends unsigned values and sign extends signed values. `truncate` accepts only
+the same signedness and an equal or narrower target, preserving the low-order
+bits for both signed and unsigned vectors. `as-signed` and `as-unsigned`
+reinterpret the existing bits without changing their width. Equal-width
+conversions are permitted.
+
+Targets may use generic width expressions. The compiler conservatively proves
+the required width relationship from normalized `WidthExpr` structure,
+constants, minimum values, and additive terms. If the relationship cannot be
+proved for every permitted generic value, compilation fails. A conversion
+target does not provide an inferred source width, so a raw integer literal
+cannot be the conversion source.
+
+For example, operands in a wider adder must each be extended explicitly:
+
+```lisp
+(assign sum
+  (+ (resize (unsigned 9) a)
+     (resize (unsigned 9) b)))
+```
+
+VHDL lowering uses `numeric_std.resize` for extension, `signed(...)` and
+`unsigned(...)` for reinterpretation, and architecture-local truncate helpers
+that explicitly select the low-order bits. In particular, signed truncation is
+not lowered directly to `numeric_std.resize`.
+
+Conversions between `bit` and vectors, slices, concatenation, saturation, and
+rounding are not implemented.
+
 ## Testbenches and simulation
 
 GateLisp sources may contain top-level `testbench` forms alongside modules. A

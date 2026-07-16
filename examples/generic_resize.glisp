@@ -1,0 +1,6 @@
+(module generic-resize
+  (generics (width :positive 8))
+  (ports
+    (input :in (unsigned width))
+    (value :out (unsigned (+ width 1))))
+  (assign value (resize (unsigned (+ width 1)) input)))

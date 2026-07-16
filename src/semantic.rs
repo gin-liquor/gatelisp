@@ -4,13 +4,13 @@ use std::{
 };
 
 use crate::{
-    BinaryOp, ClockEdge, ClockedBlockId, ClockedDecl, ConstExprAst, Expr, GenericBinding,
-    GenericId, GenericKind, GenericKindSyntax, HardwareType, InstanceId, ModuleDecl, ModuleId,
-    ModuleItem, NextStmt, PortDirection, Program, SignalId, SignalKind, SimulationTime, Span,
-    Spanned, TestbenchDecl, TestbenchId, TestbenchStmt, TypeExpr, TypedAssign, TypedClockedBlock,
-    TypedExpr, TypedExprKind, TypedGeneric, TypedGenericBinding, TypedInstance, TypedModule,
-    TypedNext, TypedPortConnection, TypedProgram, TypedReset, TypedSignal, TypedTestbench,
-    TypedTestbenchClock, TypedTestbenchStmt, UnaryOp, WidthExpr,
+    BinaryOp, ClockEdge, ClockedBlockId, ClockedDecl, ConstExprAst, ConversionKind, Expr,
+    GenericBinding, GenericId, GenericKind, GenericKindSyntax, HardwareType, InstanceId,
+    ModuleDecl, ModuleId, ModuleItem, NextStmt, PortDirection, Program, SignalId, SignalKind,
+    SimulationTime, Span, Spanned, TestbenchDecl, TestbenchId, TestbenchStmt, TypeExpr,
+    TypedAssign, TypedClockedBlock, TypedExpr, TypedExprKind, TypedGeneric, TypedGenericBinding,
+    TypedInstance, TypedModule, TypedNext, TypedPortConnection, TypedProgram, TypedReset,
+    TypedSignal, TypedTestbench, TypedTestbenchClock, TypedTestbenchStmt, UnaryOp, WidthExpr,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +74,13 @@ pub enum SemanticErrorKind {
     UnknownInstanceGeneric,
     DuplicateGenericBinding,
     InvalidGenericActual,
+    InvalidConversionTarget,
+    ConversionSourceNotVector,
+    ConversionSignednessMismatch,
+    InvalidResizeDirection,
+    InvalidTruncateDirection,
+    WidthRelationUnknown,
+    InvalidReinterpretation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1065,6 +1072,12 @@ fn check_expr(
             context,
             expr.span,
         )?,
+        Expr::Resize { target, value } => {
+            check_sized_conversion(ConversionKind::Resize, target, value, context, expr.span)?
+        }
+        Expr::Truncate { target, value } => {
+            check_sized_conversion(ConversionKind::Truncate, target, value, context, expr.span)?
+        }
     };
     if let Some(expected) = expected
         && &typed.ty != expected
@@ -1086,6 +1099,34 @@ fn check_call(
     span: Span,
 ) -> Result<TypedExpr, SemanticError> {
     match name {
+        "as-signed" | "as-unsigned" => {
+            require_arity(name, args, 1, span)?;
+            let value = check_expr(&args[0], None, context)?;
+            let ty = reinterpret_type(&value.ty, name == "as-signed").ok_or_else(|| {
+                SemanticError::new(
+                    SemanticErrorKind::InvalidReinterpretation,
+                    if name == "as-signed" {
+                        "as-signed requires an unsigned vector"
+                    } else {
+                        "as-unsigned requires a signed vector"
+                    },
+                    span,
+                )
+            })?;
+            Ok(TypedExpr {
+                kind: TypedExprKind::Convert {
+                    kind: if name == "as-signed" {
+                        ConversionKind::AsSigned
+                    } else {
+                        ConversionKind::AsUnsigned
+                    },
+                    value: Box::new(value),
+                    target_type: ty.clone(),
+                },
+                ty,
+                span,
+            })
+        }
         "not" => {
             require_arity(name, args, 1, span)?;
             let operand = check_expr(&args[0], expected, context)?;
@@ -1184,6 +1225,133 @@ fn check_call(
     }
 }
 
+fn check_sized_conversion(
+    kind: ConversionKind,
+    target: &Spanned<TypeExpr>,
+    value: &Spanned<Expr>,
+    context: &ModuleContext,
+    span: Span,
+) -> Result<TypedExpr, SemanticError> {
+    let target_type = type_from_ast(&target.value, &context.generics)?;
+    let (target_signed, target_width) = vector_parts(&target_type).ok_or_else(|| {
+        SemanticError::new(
+            SemanticErrorKind::InvalidConversionTarget,
+            "conversion target must be an unsigned or signed vector",
+            target.span,
+        )
+    })?;
+    let source = check_expr(value, None, context)?;
+    let (source_signed, source_width) = vector_parts(&source.ty).ok_or_else(|| {
+        SemanticError::new(
+            SemanticErrorKind::ConversionSourceNotVector,
+            "conversion source must have a known vector width",
+            value.span,
+        )
+    })?;
+    if target_signed != source_signed {
+        return Err(SemanticError::new(
+            SemanticErrorKind::ConversionSignednessMismatch,
+            "resize and truncate cannot change signedness",
+            span,
+        ));
+    }
+    let valid = match kind {
+        ConversionKind::Resize => prove_ge(&target_width, &source_width, &context.generics)?,
+        ConversionKind::Truncate => prove_ge(&source_width, &target_width, &context.generics)?,
+        _ => false,
+    };
+    if !valid {
+        let definitely_wrong = match (&target_width, &source_width, kind) {
+            (WidthExpr::Constant(t), WidthExpr::Constant(s), ConversionKind::Resize) => t < s,
+            (WidthExpr::Constant(t), WidthExpr::Constant(s), ConversionKind::Truncate) => t > s,
+            _ => false,
+        };
+        let error_kind = if definitely_wrong {
+            if kind == ConversionKind::Resize {
+                SemanticErrorKind::InvalidResizeDirection
+            } else {
+                SemanticErrorKind::InvalidTruncateDirection
+            }
+        } else {
+            SemanticErrorKind::WidthRelationUnknown
+        };
+        return Err(SemanticError::new(
+            error_kind,
+            if kind == ConversionKind::Resize {
+                "cannot prove that resize target width is at least source width"
+            } else {
+                "cannot prove that truncate target width is at most source width"
+            },
+            span,
+        ));
+    }
+    Ok(TypedExpr {
+        kind: TypedExprKind::Convert {
+            kind,
+            value: Box::new(source),
+            target_type: target_type.clone(),
+        },
+        ty: target_type,
+        span,
+    })
+}
+
+fn vector_parts(ty: &HardwareType) -> Option<(bool, WidthExpr)> {
+    match ty {
+        HardwareType::Unsigned(w) => Some((false, WidthExpr::Constant(u64::from(*w)))),
+        HardwareType::Signed(w) => Some((true, WidthExpr::Constant(u64::from(*w)))),
+        HardwareType::SymbolicUnsigned(w) => Some((false, w.clone())),
+        HardwareType::SymbolicSigned(w) => Some((true, w.clone())),
+        HardwareType::Bit => None,
+    }
+}
+fn reinterpret_type(ty: &HardwareType, to_signed: bool) -> Option<HardwareType> {
+    match (ty, to_signed) {
+        (HardwareType::Unsigned(w), true) => Some(HardwareType::Signed(*w)),
+        (HardwareType::SymbolicUnsigned(w), true) => Some(HardwareType::SymbolicSigned(w.clone())),
+        (HardwareType::Signed(w), false) => Some(HardwareType::Unsigned(*w)),
+        (HardwareType::SymbolicSigned(w), false) => Some(HardwareType::SymbolicUnsigned(w.clone())),
+        _ => None,
+    }
+}
+fn prove_ge(
+    big: &WidthExpr,
+    small: &WidthExpr,
+    generics: &[TypedGeneric],
+) -> Result<bool, SemanticError> {
+    if big == small {
+        return Ok(true);
+    }
+    if let (WidthExpr::Constant(a), WidthExpr::Constant(b)) = (big, small) {
+        return Ok(a >= b);
+    }
+    if let WidthExpr::Constant(s) = small
+        && minimum_with_generics(big, generics)? >= *s
+    {
+        return Ok(true);
+    }
+    let mut big_terms = Vec::new();
+    let mut small_terms = Vec::new();
+    flatten_add(big, &mut big_terms);
+    flatten_add(small, &mut small_terms);
+    for term in small_terms {
+        if let Some(index) = big_terms.iter().position(|candidate| **candidate == *term) {
+            big_terms.remove(index);
+        } else {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+fn flatten_add<'a>(expr: &'a WidthExpr, out: &mut Vec<&'a WidthExpr>) {
+    if let WidthExpr::Add(a, b) = expr {
+        flatten_add(a, out);
+        flatten_add(b, out)
+    } else {
+        out.push(expr)
+    }
+}
+
 fn check_pair(
     args: &[Spanned<Expr>],
     expected: Option<&HardwareType>,
@@ -1204,6 +1372,9 @@ fn type_hint(expr: &Spanned<Expr>, context: &ModuleContext) -> Option<HardwareTy
             lookup(context, &identifier.name).map(|info| info.ty.clone())
         }
         Expr::Integer(_) => None,
+        Expr::Resize { target, .. } | Expr::Truncate { target, .. } => {
+            type_from_ast(&target.value, &context.generics).ok()
+        }
         Expr::Call { callee, arguments } => match callee.name.as_str() {
             "=" | "/=" | "<" | "<=" | ">" | ">=" => Some(HardwareType::Bit),
             "not" => arguments.first().and_then(|arg| type_hint(arg, context)),
@@ -1214,6 +1385,14 @@ fn type_hint(expr: &Spanned<Expr>, context: &ModuleContext) -> Option<HardwareTy
                 .get(1)
                 .and_then(|arg| type_hint(arg, context))
                 .or_else(|| arguments.get(2).and_then(|arg| type_hint(arg, context))),
+            "as-signed" => arguments
+                .first()
+                .and_then(|arg| type_hint(arg, context))
+                .and_then(|ty| reinterpret_type(&ty, true)),
+            "as-unsigned" => arguments
+                .first()
+                .and_then(|arg| type_hint(arg, context))
+                .and_then(|ty| reinterpret_type(&ty, false)),
             _ => None,
         },
     }

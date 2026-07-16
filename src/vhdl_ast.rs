@@ -67,6 +67,8 @@ pub enum VhdlDeclaration {
         initial: Option<VhdlExpression>,
     },
     BoolToStdLogicFunction,
+    TruncateUnsignedFunction,
+    TruncateSignedFunction,
     Constant {
         name: VhdlIdentifier,
         ty: String,

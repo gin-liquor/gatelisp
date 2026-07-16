@@ -1,0 +1,3 @@
+(module wide-adder
+  (ports (a :in (unsigned 8)) (b :in (unsigned 8)) (sum :out (unsigned 9)))
+  (assign sum (+ (resize (unsigned 9) a) (resize (unsigned 9) b))))

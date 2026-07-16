@@ -88,6 +88,8 @@ fn architecture(out: &mut String, value: &VhdlArchitecture) {
                 out.push_str(";\n");
             }
             VhdlDeclaration::BoolToStdLogicFunction => out.push_str("  function gl_bool_to_sl(value : boolean) return std_logic is\n  begin\n    if value then\n      return '1';\n    else\n      return '0';\n    end if;\n  end function gl_bool_to_sl;\n"),
+            VhdlDeclaration::TruncateUnsignedFunction => out.push_str("  function gl_truncate_unsigned(value : unsigned; size : positive) return unsigned is\n  begin\n    return value(value'low + size - 1 downto value'low);\n  end function gl_truncate_unsigned;\n"),
+            VhdlDeclaration::TruncateSignedFunction => out.push_str("  function gl_truncate_signed(value : signed; size : positive) return signed is\n  begin\n    return value(value'low + size - 1 downto value'low);\n  end function gl_truncate_signed;\n"),
             VhdlDeclaration::Constant { name, ty, value } => { let _ = writeln!(out, "  constant {} : {} := {};", name.0, ty, expr(value)); }
         }
     }
