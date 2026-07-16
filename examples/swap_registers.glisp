@@ -1,0 +1,20 @@
+(module swap-registers
+  (ports
+    (clk :in bit)
+    (rst :in bit)
+    (a   :out (unsigned 8))
+    (b   :out (unsigned 8)))
+
+  (reg reg-a (unsigned 8) 1)
+  (reg reg-b (unsigned 8) 2)
+
+  (clocked clk
+    (reset :sync rst
+      (next reg-a 1)
+      (next reg-b 2))
+
+    (next reg-a reg-b)
+    (next reg-b reg-a))
+
+  (assign a reg-a)
+  (assign b reg-b))

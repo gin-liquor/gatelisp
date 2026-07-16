@@ -9,6 +9,8 @@ three distinct representations:
 → GateLisp syntax AST
 → name resolution and type checking
 → Typed HIR
+→ VHDL AST
+→ VHDL-2008
 ```
 
 The syntax AST supports modules containing `ports`, `wire`, `reg`, and
@@ -52,19 +54,53 @@ safe crossings are currently the designer's responsibility.
 
 ## Command line
 
-With no mode option, `glispc` displays Typed HIR. The explicit display modes are:
+With no mode option, `glispc` emits synthesizable VHDL-2008. VHDL lowering is
+performed only from Typed HIR, through a dedicated VHDL AST and deterministic
+formatter. The available display modes are:
 
 ```console
 cargo run --bin glispc -- examples/typed_adder.glisp
-cargo run --bin glispc -- --hir examples/typed_adder.glisp
+cargo run --bin glispc -- --vhdl examples/counter.glisp -o counter.vhd
+cargo run --bin glispc -- --hir examples/counter.glisp
 cargo run --bin glispc -- --ast examples/typed_adder.glisp
 cargo run --bin glispc -- --sexpr examples/typed_adder.glisp
+```
+
+`-o` and `--output` write VHDL to a file and are valid only in VHDL mode.
+
+## VHDL backend
+
+`bit` lowers to `std_logic`; unsigned and signed vectors lower to the matching
+`numeric_std` types. Inputs are entity ports. Outputs use architecture-local
+signals, followed by assignments to entity output ports, so reading an output
+inside GateLisp has unambiguous behavior.
+
+Comparisons return `std_logic` through a generated boolean conversion helper.
+Expression-valued `if` nodes are lowered into process-local temporary variables
+and complete VHDL `if` statements. Continuous assignments use `process(all)`.
+Clocked blocks use rising-edge processes with active-high synchronous or
+asynchronous reset structure.
+
+Integers are emitted as fixed 64-bit hexadecimal bit strings, type-qualified as
+`unsigned` or `signed`, then resized to the target width. This avoids depending
+on the implementation-defined VHDL `integer` range. Integer register initializers
+become VHDL signal initializations; whether an FPGA implements them depends on
+the synthesis tool and target device. Non-literal register initializers are
+currently rejected by the VHDL backend.
+
+Generated names use stable IDs plus a lowercase ASCII-sanitized source name,
+such as `gl_m0_and_gate`, `gl_p0_clk`, and `gl_s4_count`. IDs guarantee that
+case-only differences, reserved words, Unicode, and punctuation cannot collide.
+
+When GHDL is installed, generated output can be analyzed as VHDL-2008:
+
+```console
+ghdl -a --std=08 counter.vhd
 ```
 
 Source files use the `.glisp` extension. `Position::offset` is a zero-based
 UTF-8 byte offset. Line and column numbers are one-based, columns count Unicode
 scalar values, and spans are half-open.
 
-FSMs, module instances, macros, explicit conversions, hardware IR lowering, and
-VHDL generation are not implemented. VHDL will be generated from a later
-hardware representation, never directly from an S-expression or syntax AST.
+FSMs, module instances, generics, macros, automatic testbench generation, and
+CDC analysis are not implemented. Synchronizers are not inserted automatically.

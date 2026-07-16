@@ -1,0 +1,11 @@
+(module nested-if
+  (ports
+    (select :in bit)
+    (a      :in (unsigned 8))
+    (b      :in (unsigned 8))
+    (c      :in (unsigned 8))
+    (y      :out (unsigned 8)))
+
+  (assign y
+    (+ a
+       (if select b c))))

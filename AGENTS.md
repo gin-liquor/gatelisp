@@ -12,6 +12,9 @@ GateLispは、Lisp形式でハードウェア回路を記述し、将来的にVH
 * 公開型には必要に応じてrustdocを記述する。
 * Lexer、S式Parser、GateLisp意味解析、IR、VHDL生成を分離する。
 * S式ASTから直接VHDLを生成しない。
+* Typed HIRからVHDL ASTへLoweringし、VHDL ASTとformatterを分離する。
+* VHDL名は専用のname mappingを介して生成する。
+* VHDL出力の決定性を維持し、Golden Testと利用可能ならGHDLで検証する。
 * 現在依頼された範囲を超える機能を勝手に追加しない。
 * 変更後は必ずformat、clippy、testを実行する。
 * テストしやすさと分かりやすさを、過度な抽象化より優先する。
