@@ -137,12 +137,13 @@ impl<'a> Lexer<'a> {
             }
             TokenKind::Keyword(keyword.to_owned())
         } else if is_integer_syntax(text) {
-            TokenKind::Integer(text.parse().map_err(|_| {
-                ParseError::new(
-                    ErrorKind::IntegerOutOfRange,
-                    "integer is outside the i64 range",
-                    span,
-                )
+            TokenKind::Integer(parse_integer(text).map_err(|message| {
+                let kind = if message == "integer is outside the i64 range" {
+                    ErrorKind::IntegerOutOfRange
+                } else {
+                    ErrorKind::InvalidIntegerLiteral
+                };
+                ParseError::new(kind, message, span)
             })?)
         } else {
             TokenKind::Symbol(text.to_owned())
@@ -186,5 +187,52 @@ impl<'a> Lexer<'a> {
 
 fn is_integer_syntax(text: &str) -> bool {
     let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
-    !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+    digits.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+        || digits
+            .strip_prefix('_')
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|ch| ch.is_ascii_digit())
+}
+
+fn parse_integer(text: &str) -> Result<i64, String> {
+    let (negative, body) = match text.strip_prefix('-') {
+        Some(body) => (true, body),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    let (radix, digits) = match body.get(..2) {
+        Some("0b" | "0B") => (2, &body[2..]),
+        Some("0o" | "0O") => (8, &body[2..]),
+        Some("0x" | "0X") => (16, &body[2..]),
+        _ => (10, body),
+    };
+    if digits.is_empty() {
+        return Err("integer literal requires at least one digit".into());
+    }
+    let mut value: i128 = 0;
+    let mut previous_digit = false;
+    for ch in digits.chars() {
+        if ch == '_' {
+            if !previous_digit {
+                return Err("underscore must appear between digits".into());
+            }
+            previous_digit = false;
+            continue;
+        }
+        let digit = ch
+            .to_digit(radix)
+            .ok_or_else(|| format!("invalid digit '{ch}' in base-{radix} integer literal"))?;
+        value = value
+            .checked_mul(i128::from(radix))
+            .and_then(|v| v.checked_add(i128::from(digit)))
+            .ok_or_else(|| "integer is outside the i64 range".to_owned())?;
+        previous_digit = true;
+    }
+    if !previous_digit {
+        return Err("underscore must appear between digits".into());
+    }
+    if negative {
+        i64::try_from(-value).map_err(|_| "integer is outside the i64 range".to_owned())
+    } else {
+        i64::try_from(value).map_err(|_| "integer is outside the i64 range".to_owned())
+    }
 }

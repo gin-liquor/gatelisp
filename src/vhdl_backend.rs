@@ -628,6 +628,9 @@ fn lower_case_do(
         .transpose()?
         .unwrap_or_default();
     otherwise.extend(lower_array_writes(&case_do.else_writes, context)?);
+    for nested in &case_do.else_nested {
+        otherwise.extend(lower_case_do(nested, context)?);
+    }
     let mut labels = std::collections::HashSet::new();
     for arm in case_do.arms.iter().rev() {
         validate_case_key(
@@ -639,6 +642,9 @@ fn lower_case_do(
         )?;
         let mut body = lower_updates(&arm.body, context)?;
         body.extend(lower_array_writes(&arm.writes, context)?);
+        for nested in &arm.nested {
+            body.extend(lower_case_do(nested, context)?);
+        }
         otherwise = vec![VhdlSequentialStatement::If {
             condition: VhdlExpression::Binary {
                 op: "=".into(),
@@ -1872,17 +1878,7 @@ fn module_truncate_helpers(module: &TypedModule) -> (bool, bool) {
             }
         }
         for case_do in &block.case_dos {
-            expr_truncate_helpers(&case_do.selector, &mut flags);
-            for arm in &case_do.arms {
-                for update in &arm.body {
-                    expr_truncate_helpers(&update.value, &mut flags);
-                }
-            }
-            if let Some(body) = &case_do.else_body {
-                for update in body {
-                    expr_truncate_helpers(&update.value, &mut flags);
-                }
-            }
+            case_do_for_each_expr(case_do, &mut |expr| expr_truncate_helpers(expr, &mut flags));
         }
     }
     flags
@@ -1951,7 +1947,7 @@ fn module_needs_bit_concat(module: &TypedModule) -> bool {
             b.updates.iter().any(|u| expr_has_bit_concat(&u.value))
                 || b.case_dos
                     .iter()
-                    .any(|case_do| case_do_any(case_do, expr_has_bit_concat))
+                    .any(|case_do| case_do_any(case_do, &expr_has_bit_concat))
                 || b.reset
                     .as_ref()
                     .is_some_and(|r| r.updates.iter().any(|u| expr_has_bit_concat(&u.value)))
@@ -2012,7 +2008,7 @@ fn module_needs_reverse_bits(module: &TypedModule) -> bool {
             b.updates.iter().any(|u| expr_has_reverse_bits(&u.value))
                 || b.case_dos
                     .iter()
-                    .any(|case_do| case_do_any(case_do, expr_has_reverse_bits))
+                    .any(|case_do| case_do_any(case_do, &expr_has_reverse_bits))
                 || b.reset
                     .as_ref()
                     .is_some_and(|r| r.updates.iter().any(|u| expr_has_reverse_bits(&u.value)))
@@ -2071,7 +2067,7 @@ fn module_needs_bit_at(module: &TypedModule) -> bool {
                 || block
                     .case_dos
                     .iter()
-                    .any(|case_do| case_do_any(case_do, expr_has_bit_at))
+                    .any(|case_do| case_do_any(case_do, &expr_has_bit_at))
                 || block
                     .reset
                     .as_ref()
@@ -2079,19 +2075,59 @@ fn module_needs_bit_at(module: &TypedModule) -> bool {
         })
 }
 
-fn case_do_any<F>(case_do: &crate::TypedCaseDo, predicate: F) -> bool
-where
-    F: Fn(&TypedExpr) -> bool,
-{
+fn case_do_any(case_do: &crate::TypedCaseDo, predicate: &impl Fn(&TypedExpr) -> bool) -> bool {
     predicate(&case_do.selector)
-        || case_do
-            .arms
-            .iter()
-            .any(|arm| arm.body.iter().any(|u| predicate(&u.value)))
+        || case_do.arms.iter().any(|arm| {
+            arm.body.iter().any(|u| predicate(&u.value))
+                || arm
+                    .writes
+                    .iter()
+                    .any(|write| predicate(&write.address) || predicate(&write.value))
+                || arm
+                    .nested
+                    .iter()
+                    .any(|nested| case_do_any(nested, predicate))
+        })
         || case_do
             .else_body
             .as_ref()
             .is_some_and(|body| body.iter().any(|u| predicate(&u.value)))
+        || case_do
+            .else_writes
+            .iter()
+            .any(|write| predicate(&write.address) || predicate(&write.value))
+        || case_do
+            .else_nested
+            .iter()
+            .any(|nested| case_do_any(nested, predicate))
+}
+
+fn case_do_for_each_expr(case_do: &crate::TypedCaseDo, action: &mut impl FnMut(&TypedExpr)) {
+    action(&case_do.selector);
+    for arm in &case_do.arms {
+        for update in &arm.body {
+            action(&update.value);
+        }
+        for write in &arm.writes {
+            action(&write.address);
+            action(&write.value);
+        }
+        for nested in &arm.nested {
+            case_do_for_each_expr(nested, action);
+        }
+    }
+    if let Some(body) = &case_do.else_body {
+        for update in body {
+            action(&update.value);
+        }
+    }
+    for write in &case_do.else_writes {
+        action(&write.address);
+        action(&write.value);
+    }
+    for nested in &case_do.else_nested {
+        case_do_for_each_expr(nested, action);
+    }
 }
 
 fn testbench_needs_bit_at(testbench: &TypedTestbench) -> bool {
@@ -2331,28 +2367,29 @@ fn module_enum_members(
             }
         }
         for case_do in &block.case_dos {
-            if let HardwareType::Enum(enum_id, _) = case_do.selector.ty
-                && enum_id == id
-            {
-                for arm in &case_do.arms {
-                    if let Some(member_id) = arm.key.enum_member {
-                        members.insert(member_id);
-                    }
-                }
-            }
-            for arm in &case_do.arms {
-                for update in &arm.body {
-                    collect_enum_members_expr(&update.value, id, &mut members);
-                }
-            }
-            if let Some(body) = &case_do.else_body {
-                for update in body {
-                    collect_enum_members_expr(&update.value, id, &mut members);
-                }
-            }
+            collect_case_do_enum_members(case_do, id, &mut members);
         }
     }
     members
+}
+
+fn collect_case_do_enum_members(
+    case_do: &crate::TypedCaseDo,
+    id: crate::EnumId,
+    members: &mut std::collections::HashSet<crate::EnumMemberId>,
+) {
+    if let HardwareType::Enum(enum_id, _) = case_do.selector.ty
+        && enum_id == id
+    {
+        for arm in &case_do.arms {
+            if let Some(member_id) = arm.key.enum_member {
+                members.insert(member_id);
+            }
+        }
+    }
+    case_do_for_each_expr(case_do, &mut |expr| {
+        collect_enum_members_expr(expr, id, members)
+    });
 }
 
 fn testbench_enum_members(
@@ -2390,17 +2427,10 @@ fn module_uses_rom(module: &TypedModule, id: crate::RomId) -> bool {
                         .iter()
                         .any(|update| expr_uses_rom(&update.value, id))
                 })
-                || block.case_dos.iter().any(|case_do| {
-                    expr_uses_rom(&case_do.selector, id)
-                        || case_do.arms.iter().any(|arm| {
-                            arm.body
-                                .iter()
-                                .any(|update| expr_uses_rom(&update.value, id))
-                        })
-                        || case_do.else_body.as_ref().is_some_and(|body| {
-                            body.iter().any(|update| expr_uses_rom(&update.value, id))
-                        })
-                })
+                || block
+                    .case_dos
+                    .iter()
+                    .any(|case_do| case_do_any(case_do, &|expr| expr_uses_rom(expr, id)))
         })
 }
 

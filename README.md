@@ -48,6 +48,21 @@ Types must match exactly. GateLisp performs no implicit conversion between
 literal is the sole exception: it is checked against an expected type supplied
 by an assignment, register initializer, branch, or typed sibling operand.
 
+## Integer literals and nested `case-do`
+
+Integer literals are decimal by default and also support binary (`0b`/`0B`),
+octal (`0o`/`0O`), and hexadecimal (`0x`/`0X`) notation. Underscores may
+separate digits, for example `1_000_000`, `0b1010_0101`, and `0x08_02_AA`.
+They must appear strictly between digits. Prefixes require at least one valid
+digit; leading zeroes remain decimal unless an explicit `0o` or `0O` prefix is
+used. Literal values are checked against their expected hardware type.
+
+`case-do` is available only within `clocked` bodies. Its arm bodies may contain
+`next`, `set!`, `register-array-write`, and further `case-do` forms. Nested
+selectors are evaluated once in their enclosing arm. Arms of the same
+`case-do` are exclusive, so they may use the same register-array write port;
+updates or writes that can occur together in one arm remain errors.
+
 Multiple clock domains can be represented. Clock-domain-crossing safety checks
 are not implemented, and GateLisp does not insert synchronizers automatically;
 safe crossings are currently the designer's responsibility.

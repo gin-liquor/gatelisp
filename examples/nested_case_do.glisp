@@ -1,0 +1,14 @@
+(module nested-case-do
+  (ports (clk :in bit) (state :in bit) (command :in bit))
+  (reg busy bit 0)
+  (reg fault bit 0)
+  (clocked clk
+    (case-do state
+      (0
+        (case-do command
+          (0 (next busy 1))
+          (else (next fault 1))))
+      (else
+        (case-do command
+          (0 (next busy 0))
+          (else (next fault 0)))))))

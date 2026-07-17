@@ -1085,17 +1085,20 @@ fn analyze_clocked(
                 .related(previous));
             }
         }
-        for write in typed
-            .arms
-            .iter()
-            .flat_map(|arm| arm.writes.iter())
-            .chain(typed.else_writes.iter())
-        {
-            if let Some(previous) = array_drivers.insert(write.array_id, write.span) {
+        for (array_id, write_span) in case_do_write_spans(&typed) {
+            if let Some(previous) = region_arrays.insert(array_id, write_span) {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::MultipleRegisterArrayWrites,
+                    "register-array is written more than once in one clocked region",
+                    write_span,
+                )
+                .related(previous));
+            }
+            if let Some(previous) = array_drivers.insert(array_id, write_span) {
                 return Err(SemanticError::new(
                     SemanticErrorKind::MultipleRegisterArrayWrites,
                     "register-array is written by multiple clocked blocks",
-                    write.span,
+                    write_span,
                 )
                 .related(previous));
             }
@@ -1204,6 +1207,32 @@ fn analyze_case_do(
         for write in &arm.value.writes {
             writes.push(analyze_array_write(write, context, &mut array_seen)?);
         }
+        let mut nested = Vec::new();
+        for child in &arm.value.nested {
+            let (typed, child_targets) = analyze_case_do(&child.value, child.span, context)?;
+            for (target, target_span) in child_targets {
+                if let Some(previous) = seen.insert(target, target_span) {
+                    return Err(SemanticError::new(
+                        SemanticErrorKind::DuplicateNext,
+                        "register is updated more than once in one case-do arm",
+                        target_span,
+                    )
+                    .related(previous));
+                }
+                all_targets.entry(target).or_insert(target_span);
+            }
+            for (array_id, write_span) in case_do_write_spans(&typed) {
+                if let Some(previous) = array_seen.insert(array_id, write_span) {
+                    return Err(SemanticError::new(
+                        SemanticErrorKind::MultipleRegisterArrayWrites,
+                        "register-array is written more than once in one case-do arm",
+                        write_span,
+                    )
+                    .related(previous));
+                }
+            }
+            nested.push(typed);
+        }
         for (target, target_span) in seen {
             all_targets.entry(target).or_insert(target_span);
         }
@@ -1211,22 +1240,18 @@ fn analyze_case_do(
             key,
             body,
             writes,
+            nested,
             span: arm.span,
         });
     }
+    let mut else_seen = HashMap::new();
     let else_body = case_do
         .else_body
         .as_ref()
         .map(|body| {
-            let mut seen = HashMap::new();
-            let typed = body
-                .iter()
-                .map(|next| analyze_next(next, context, &mut seen))
-                .collect::<Result<Vec<_>, _>>()?;
-            for (target, target_span) in seen {
-                all_targets.entry(target).or_insert(target_span);
-            }
-            Ok::<_, SemanticError>(typed)
+            body.iter()
+                .map(|next| analyze_next(next, context, &mut else_seen))
+                .collect::<Result<Vec<_>, _>>()
         })
         .transpose()?;
     let mut else_writes = Vec::new();
@@ -1234,16 +1259,69 @@ fn analyze_case_do(
     for write in &case_do.else_writes {
         else_writes.push(analyze_array_write(write, context, &mut else_array_seen)?);
     }
+    let mut else_nested = Vec::new();
+    for child in &case_do.else_nested {
+        let (typed, child_targets) = analyze_case_do(&child.value, child.span, context)?;
+        for (target, target_span) in child_targets {
+            if let Some(previous) = else_seen.insert(target, target_span) {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::DuplicateNext,
+                    "register is updated more than once in one case-do arm",
+                    target_span,
+                )
+                .related(previous));
+            }
+            all_targets.entry(target).or_insert(target_span);
+        }
+        for (array_id, write_span) in case_do_write_spans(&typed) {
+            if let Some(previous) = else_array_seen.insert(array_id, write_span) {
+                return Err(SemanticError::new(
+                    SemanticErrorKind::MultipleRegisterArrayWrites,
+                    "register-array is written more than once in one case-do arm",
+                    write_span,
+                )
+                .related(previous));
+            }
+        }
+        else_nested.push(typed);
+    }
+    for (target, target_span) in else_seen {
+        all_targets.entry(target).or_insert(target_span);
+    }
     Ok((
         TypedCaseDo {
             selector,
             arms,
             else_body,
             else_writes,
+            else_nested,
             span,
         },
         all_targets,
     ))
+}
+
+fn case_do_write_spans(case_do: &TypedCaseDo) -> HashMap<crate::RegisterArrayId, Span> {
+    let mut writes = HashMap::new();
+    for arm in &case_do.arms {
+        for write in &arm.writes {
+            writes.entry(write.array_id).or_insert(write.span);
+        }
+        for nested in &arm.nested {
+            for (array_id, span) in case_do_write_spans(nested) {
+                writes.entry(array_id).or_insert(span);
+            }
+        }
+    }
+    for write in &case_do.else_writes {
+        writes.entry(write.array_id).or_insert(write.span);
+    }
+    for nested in &case_do.else_nested {
+        for (array_id, span) in case_do_write_spans(nested) {
+            writes.entry(array_id).or_insert(span);
+        }
+    }
+    writes
 }
 
 fn analyze_array_write(

@@ -232,6 +232,7 @@ pub struct CaseDoStmt {
     pub arms: Vec<Spanned<CaseDoArm>>,
     pub else_body: Option<Vec<Spanned<NextStmt>>>,
     pub else_writes: Vec<Spanned<RegisterArrayWrite>>,
+    pub else_nested: Vec<Spanned<CaseDoStmt>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -239,6 +240,7 @@ pub struct CaseDoArm {
     pub label: Spanned<Expr>,
     pub body: Vec<Spanned<NextStmt>>,
     pub writes: Vec<Spanned<RegisterArrayWrite>>,
+    pub nested: Vec<Spanned<CaseDoStmt>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

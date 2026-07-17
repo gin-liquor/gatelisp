@@ -254,6 +254,7 @@ pub struct TypedCaseDo {
     pub else_body: Option<Vec<TypedNext>>,
     pub span: Span,
     pub else_writes: Vec<TypedRegisterArrayWrite>,
+    pub else_nested: Vec<TypedCaseDo>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -262,6 +263,7 @@ pub struct TypedCaseDoArm {
     pub body: Vec<TypedNext>,
     pub span: Span,
     pub writes: Vec<TypedRegisterArrayWrite>,
+    pub nested: Vec<TypedCaseDo>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
