@@ -11,6 +11,7 @@ pub enum ErrorKind {
     InvalidEscape,
     EmptyKeyword,
     IntegerOutOfRange,
+    InvalidIntegerLiteral,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

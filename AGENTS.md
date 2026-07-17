@@ -70,6 +70,16 @@ unsigned address/data, and provide one write port per array. Distinct
 across clocked drivers are errors. Do not implement reset clearing, array
 ports, sparse initializers, signed/bit/enum arrays, or implicit conversions.
 
+## Radix literals and nested case-do guidance (Stage 11.75)
+
+Support decimal, `0b`/`0B`, `0o`/`0O`, and `0x`/`0X` integer literals, with
+underscores only between valid digits and span-bearing checked-parse errors.
+Nested `case-do` is valid only in clocked statement bodies, including `else`.
+Maintain exclusive-arm semantics: writes in mutually exclusive arms share one
+register-array port, while updates or writes that can execute in the same arm
+are errors. Backend analyses must recurse through nested selectors, updates,
+and writes.
+
 ## Language concepts
 
 GateLispでは、Lispの構文をコンパイル時の回路生成に利用する。

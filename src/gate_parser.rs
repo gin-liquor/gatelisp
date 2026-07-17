@@ -1,5 +1,7 @@
 use std::fmt;
 
+use num_traits::{Signed, ToPrimitive, Zero};
+
 use crate::{
     AssignStmt, CaseDoArm, CaseDoStmt, CaseExprArm, ClockEdgeSyntax, ClockedDecl, ConstExprAst,
     EnumDecl, EnumMemberDecl, Expr, GenericBinding, GenericDecl, GenericKindSyntax, Identifier,
@@ -189,7 +191,7 @@ fn parse_rom(expression: &Spanned<SExpr>) -> Result<Spanned<RomDecl>, GateParseE
                     value_expr,
                 ));
             };
-            if value < 0 {
+            if value.is_negative() {
                 return Err(error(
                     GateParseErrorKind::InvalidExpression,
                     "rom option must be non-negative",
@@ -215,7 +217,13 @@ fn parse_rom(expression: &Spanned<SExpr>) -> Result<Spanned<RomDecl>, GateParseE
                     &list[index],
                 ));
             }
-            *slot = Some(value as u64);
+            *slot = Some(value.to_u64().ok_or_else(|| {
+                error(
+                    GateParseErrorKind::InvalidConstExpression,
+                    "ROM option is outside the supported range",
+                    value_expr,
+                )
+            })?);
             index += 2;
             continue;
         }
@@ -248,7 +256,7 @@ fn parse_rom(expression: &Spanned<SExpr>) -> Result<Spanned<RomDecl>, GateParseE
                 &entry[1],
             ));
         };
-        if address < 0 || value < 0 {
+        if address.is_negative() || value.is_negative() {
             return Err(error(
                 GateParseErrorKind::InvalidExpression,
                 "rom values must be non-negative",
@@ -257,8 +265,20 @@ fn parse_rom(expression: &Spanned<SExpr>) -> Result<Spanned<RomDecl>, GateParseE
         }
         entries.push(Spanned {
             value: RomEntryDecl {
-                address: address as u64,
-                value: value as u64,
+                address: address.to_u64().ok_or_else(|| {
+                    error(
+                        GateParseErrorKind::InvalidConstExpression,
+                        "ROM address is outside the supported range",
+                        &entry[0],
+                    )
+                })?,
+                value: value.to_u64().ok_or_else(|| {
+                    error(
+                        GateParseErrorKind::InvalidConstExpression,
+                        "ROM value is outside the supported range",
+                        &entry[1],
+                    )
+                })?,
                 span: item.span,
             },
             span: item.span,
@@ -344,7 +364,7 @@ fn parse_enum(expression: &Spanned<SExpr>) -> Result<Spanned<EnumDecl>, GatePars
             &list[3],
         ));
     };
-    if width <= 0 || width > i64::from(u32::MAX) {
+    if width <= 0.into() || width > u32::MAX.into() {
         return Err(error(
             GateParseErrorKind::InvalidExpression,
             "enum width must be positive",
@@ -371,7 +391,7 @@ fn parse_enum(expression: &Spanned<SExpr>) -> Result<Spanned<EnumDecl>, GatePars
                 &values[1],
             ));
         };
-        if value < 0 {
+        if value.is_negative() {
             return Err(error(
                 GateParseErrorKind::InvalidExpression,
                 "enum member value must be non-negative",
@@ -381,7 +401,13 @@ fn parse_enum(expression: &Spanned<SExpr>) -> Result<Spanned<EnumDecl>, GatePars
         members.push(Spanned {
             value: EnumMemberDecl {
                 name: member_name,
-                value: value as u64,
+                value: value.to_u64().ok_or_else(|| {
+                    error(
+                        GateParseErrorKind::InvalidConstExpression,
+                        "enum value is outside the supported range",
+                        &values[1],
+                    )
+                })?,
                 span: item.span,
             },
             span: item.span,
@@ -397,7 +423,13 @@ fn parse_enum(expression: &Spanned<SExpr>) -> Result<Spanned<EnumDecl>, GatePars
     Ok(Spanned {
         value: EnumDecl {
             name,
-            width: width as u32,
+            width: width.to_u32().ok_or_else(|| {
+                error(
+                    GateParseErrorKind::InvalidConstExpression,
+                    "enum width is outside the supported range",
+                    &list[3],
+                )
+            })?,
             members,
             span: expression.span,
         },
@@ -534,22 +566,22 @@ fn parse_type(expression: &Spanned<SExpr>) -> Result<Spanned<TypeExpr>, GatePars
             if list.len() == 2
                 && (is_symbol(list.first(), "unsigned") || is_symbol(list.first(), "signed")) =>
         {
-            if let SExpr::Integer(value) = list[1].value {
-                if value == 0 {
+            if let SExpr::Integer(value) = &list[1].value {
+                if value.is_zero() {
                     return Err(error(
                         GateParseErrorKind::ZeroWidth,
                         "type width must be greater than zero",
                         &list[1],
                     ));
                 }
-                if value < 0 {
+                if value.is_negative() {
                     return Err(error(
                         GateParseErrorKind::NegativeWidth,
                         "type width cannot be negative",
                         &list[1],
                     ));
                 }
-                let width = u32::try_from(value).map_err(|_| {
+                let width = u32::try_from(*value).map_err(|_| {
                     error(
                         GateParseErrorKind::WidthOutOfRange,
                         "type width exceeds u32",
@@ -626,8 +658,8 @@ fn parse_generics(
                     ));
                 }
             };
-            let default = match parts[2].value {
-                SExpr::Integer(v) if v >= 0 => u64::try_from(v).map_err(|_| {
+            let default = match &parts[2].value {
+                SExpr::Integer(v) if !v.is_negative() => v.to_u64().ok_or_else(|| {
                     error(
                         GateParseErrorKind::InvalidGenericDefault,
                         "generic default is out of range",
@@ -656,13 +688,15 @@ fn parse_generics(
 
 fn parse_const_expr(expression: &Spanned<SExpr>) -> Result<Spanned<ConstExprAst>, GateParseError> {
     let value = match &expression.value {
-        SExpr::Integer(v) if *v >= 0 => ConstExprAst::Integer(u64::try_from(*v).map_err(|_| {
-            error(
-                GateParseErrorKind::InvalidConstExpression,
-                "constant is out of range",
-                expression,
-            )
-        })?),
+        SExpr::Integer(v) if !v.is_negative() => {
+            ConstExprAst::Integer(v.to_u64().ok_or_else(|| {
+                error(
+                    GateParseErrorKind::InvalidConstExpression,
+                    "constant is out of range",
+                    expression,
+                )
+            })?)
+        }
         SExpr::Symbol(name) => ConstExprAst::Reference(Identifier {
             name: name.clone(),
             span: expression.span,
@@ -1027,6 +1061,7 @@ fn parse_case_do(expression: &Spanned<SExpr>) -> Result<CaseDoStmt, GateParseErr
     let mut arms = Vec::new();
     let mut else_body = None;
     let mut else_writes = Vec::new();
+    let mut else_nested = Vec::new();
     for (index, arm) in list[2..].iter().enumerate() {
         let SExpr::List(items) = &arm.value else {
             return Err(error(
@@ -1043,6 +1078,7 @@ fn parse_case_do(expression: &Spanned<SExpr>) -> Result<CaseDoStmt, GateParseErr
             ));
         }
         let mut writes = Vec::new();
+        let mut nested = Vec::new();
         let body = items[1..]
             .iter()
             .map(|statement| {
@@ -1056,6 +1092,13 @@ fn parse_case_do(expression: &Spanned<SExpr>) -> Result<CaseDoStmt, GateParseErr
                 if is_symbol(parts.first(), "register-array-write") {
                     writes.push(Spanned {
                         value: parse_register_array_write(statement)?,
+                        span: statement.span,
+                    });
+                    return Ok(None);
+                }
+                if is_symbol(parts.first(), "case-do") {
+                    nested.push(Spanned {
+                        value: parse_case_do(statement)?,
                         span: statement.span,
                     });
                     return Ok(None);
@@ -1086,12 +1129,14 @@ fn parse_case_do(expression: &Spanned<SExpr>) -> Result<CaseDoStmt, GateParseErr
             }
             else_body = Some(body);
             else_writes = writes;
+            else_nested = nested;
         } else {
             arms.push(Spanned {
                 value: CaseDoArm {
                     label: parse_expr(&items[0])?,
                     body,
                     writes,
+                    nested,
                 },
                 span: arm.span,
             });
@@ -1109,6 +1154,7 @@ fn parse_case_do(expression: &Spanned<SExpr>) -> Result<CaseDoStmt, GateParseErr
         arms,
         else_body,
         else_writes,
+        else_nested,
     })
 }
 
@@ -1290,14 +1336,20 @@ fn parse_register_array(expression: &Spanned<SExpr>) -> Result<RegisterArrayDecl
                 &list[3 + index * 2],
             ));
         };
-        if value < 0 {
+        if value.is_negative() {
             return Err(error(
                 GateParseErrorKind::InvalidRegister,
                 "register-array option must be non-negative",
                 &list[3 + index * 2],
             ));
         }
-        values[index] = Some(value as u64);
+        values[index] = Some(value.to_u64().ok_or_else(|| {
+            error(
+                GateParseErrorKind::InvalidConstExpression,
+                "register-array option is outside the supported range",
+                &list[3 + index * 2],
+            )
+        })?);
     }
     let [Some(address_width), Some(data_width), Some(initial_value)] = values else {
         return Err(error(
@@ -1706,7 +1758,7 @@ fn parse_time(
     unit: &Spanned<SExpr>,
 ) -> Result<TimeLiteral, GateParseError> {
     let value = match value_expr.value {
-        SExpr::Integer(value) if value > 0 => u64::try_from(value).map_err(|_| {
+        SExpr::Integer(value) if value > 0.into() => value.to_u64().ok_or_else(|| {
             error(
                 GateParseErrorKind::InvalidTime,
                 "time value is out of range",
@@ -1801,7 +1853,7 @@ fn parse_testbench_stmt(
         )?;
         let count = if let Some(count) = list.get(2) {
             match count.value {
-                SExpr::Integer(value) if value > 0 => u32::try_from(value).map_err(|_| {
+                SExpr::Integer(value) if value > 0.into() => value.to_u32().ok_or_else(|| {
                     error(
                         GateParseErrorKind::InvalidWaitRising,
                         "wait-rising count exceeds u32",

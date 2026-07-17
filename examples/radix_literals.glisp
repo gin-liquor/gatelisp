@@ -1,0 +1,20 @@
+(enum Opcode
+  :width 5
+  (NOP 0x00)
+  (WRITE 0x01)
+  (HALT 0x1F))
+
+(rom microcode
+  :address-width 0x08
+  :data-width 0x18
+  :default 0xF8_00_00
+  (0x00 0x08_01_00)
+  (0x01 0x21_04_00))
+
+(module radix-literals
+  (ports (clk :in bit) (opcode :in (unsigned 5)))
+  (register-array registers :address-width 0b100 :data-width 0x08 :initial 0x00)
+  (clocked clk
+    (case-do opcode
+      (0x00 (register-array-write registers 0x01 0xAA))
+      (else (register-array-write registers 0x02 0b0101_0101)))))
